@@ -33,6 +33,12 @@ struct CheckedCondition {
     second: bool,
 }
 
+#[derive(Template)]
+#[template(path = "checked-self-fragment.html")]
+struct CheckedSelfFragment<'a> {
+    title: &'a str,
+}
+
 #[test]
 fn checked_template_renders_typed_data_and_escapes_html() {
     let items = vec![Item {
@@ -183,6 +189,10 @@ fn layouts_and_fragments_compose_without_global_state() {
             "before{#fragment card}<b>{text}</b>{/fragment}after",
         )
         .template("fragment.html", "{#include parts.html$card text='Hi' /}")
+        .template(
+            "self-fragment.html",
+            "{#fragment card rendered=false}<i>{text}</i>{/fragment}{#include $card text='Self' /}",
+        )
         .build()
         .unwrap();
 
@@ -209,6 +219,16 @@ fn layouts_and_fragments_compose_without_global_state() {
         .unwrap();
     let fragment = block_on(template.data("text", "Direct").render()).unwrap();
     assert_eq!(fragment.to_string(), "<b>Direct</b>");
+
+    let template = block_on(engine.template("self-fragment.html")).unwrap();
+    let rendered = block_on(template.instance().render()).unwrap();
+    assert_eq!(rendered.to_string(), "<i>Self</i>");
+
+    let rendered = block_on(Engine::new().unwrap().render(CheckedSelfFragment {
+        title: "Checked self",
+    }))
+    .unwrap();
+    assert_eq!(rendered.to_string(), "<b>Checked self</b>\n");
 }
 
 #[test]

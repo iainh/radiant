@@ -705,7 +705,11 @@ impl Engine {
             .split_once('$')
             .map(|(template_id, fragment)| (template_id.to_owned(), fragment.to_owned()))
         {
-            id = template_id;
+            id = if template_id.is_empty() {
+                template.name.clone()
+            } else {
+                template_id
+            };
             let id = self
                 .resolve_template_id(&id, Some(state.media_type), state.language.as_deref())
                 .await?;

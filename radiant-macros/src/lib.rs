@@ -507,7 +507,9 @@ impl Loader {
             let template_id = dependency
                 .split_once('$')
                 .map_or(dependency, |(template_id, _)| template_id);
-            self.load(template_id, stack);
+            if !template_id.is_empty() {
+                self.load(template_id, stack);
+            }
         }
         stack.pop();
     }
