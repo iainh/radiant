@@ -1,17 +1,39 @@
 # Radiant
 
-Radiant brings the useful ideas from [Quarkus Qute](https://quarkus.io/guides/qute-reference) to Rust without copying its Java object model. It combines a Qute-style template language with Rust data derives, asynchronous extension points, strict rendering, and an Axum-native response layer.
+A strict, async, Qute-style template engine for Rust, with first-class Axum support.
 
-The workspace contains:
+Radiant brings the useful ideas from [Quarkus Qute](https://quarkus.io/guides/qute-reference) to Rust without copying its Java object model. Templates are checked at compile time, data is exposed through explicit derives rather than reflection and rendering fails loudly instead of printing blanks.
 
-- `radiant`: runtime, value model, checked template derives, loaders, and rendering
-- `radiant-compiler`: dependency-light parser and owned AST for runtime use and tooling
-- `radiant-macros`: compile-time template loading, dependency validation, and derives
-- `radiant-axum`: request extraction, content negotiation, deadlines, and responses
+## Features
 
-## Checked templates
+- **Checked templates.** `#[derive(Template)]` parses the template and every static include at compile time, so a missing file or a broken include graph fails the build.
+- **Compiled hot paths.** Templates made of text, expressions, conditionals and loops compile to direct Rust field access and control flow. Templates that need includes, resolvers or variants fall back to the full evaluator automatically.
+- **Strict by default.** Unresolved values are errors unless you make them safe with `??` or supply a default with `?:`.
+- **Async resolvers.** Value and namespace resolvers are asynchronous and run in deterministic priority order.
+- **Media and locale variants.** `invoice.html`, `invoice.json` and `invoice.fr.html` are selected from the request, and output is escaped for the media type it targets.
+- **Axum integration.** A `Renderer` extractor handles content negotiation, locale selection, deadlines and error responses.
+- **Runtime templates.** The same parser and evaluator serve templates loaded from disk, built at runtime or authored by end users under a restricted engine.
 
-Put application templates below `templates/` and derive `Template` on their data model:
+## Workspace
+
+| Crate | Purpose |
+| --- | --- |
+| `radiant` | Runtime, value model, checked template derives, loaders and rendering |
+| `radiant-compiler` | Dependency-light parser and owned AST for runtime use and tooling |
+| `radiant-macros` | Compile-time template loading, dependency validation and derives |
+| `radiant-axum` | Request extraction, content negotiation, deadlines and responses |
+
+## Quick start
+
+Radiant isn't published to crates.io yet. Add it as a path or git dependency:
+
+```toml
+[dependencies]
+radiant = { path = "../radiant" }
+radiant-axum = { path = "../radiant/radiant-axum" }
+```
+
+Put templates under `templates/` at your crate root:
 
 ```html
 <!-- templates/products.html -->
@@ -22,6 +44,8 @@ Put application templates below `templates/` and derive `Template` on their data
   <p>No products</p>
 {/for}
 ```
+
+Derive `TemplateValue` on the data you want templates to see and `Template` on the page model:
 
 ```rust
 use radiant::{Engine, Template, TemplateValue};
@@ -39,36 +63,30 @@ struct ProductsPage<'a> {
     products: &'a [Product],
 }
 
-# async fn example() -> Result<(), radiant::RenderError> {
-let rendered = Engine::new()?
-    .render(ProductsPage { title: "Products", products: &[] })
-    .await?;
-# Ok(())
-# }
+async fn example() -> Result<(), radiant::RenderError> {
+    let rendered = Engine::new()?
+        .render(ProductsPage { title: "Products", products: &[] })
+        .await?;
+    println!("{rendered}");
+    Ok(())
+}
 ```
 
-The derive reads and parses the root template and every static include during compilation. The complete dependency graph is embedded in the binary, and `include_bytes!` makes Cargo rebuild it when any template changes. Rust fields are exposed explicitly through `TemplateValue`; templates cannot reflect over arbitrary application objects.
+Templates cannot reflect over arbitrary application objects. Only fields exposed through `TemplateValue` are visible, and the derive embeds the whole dependency graph in the binary with `include_bytes!`, so Cargo rebuilds when any template changes.
 
-For templates made from text, expressions, conditionals, and loops, the derive emits direct Rust field access and control flow. Adjacent literal output is combined, values are escaped directly into the destination, and integers and floats use stack buffers. Templates that need includes, runtime resolvers, locale/media variants, or other dynamic features automatically use the full Qute evaluator instead.
+## Checked templates
 
-High-throughput callers can retain an output allocation across renders:
+For templates built from text, expressions, conditionals and loops, the derive emits direct Rust field access and control flow. Adjacent literal output is merged, values are escaped straight into the destination and integers and floats are formatted on the stack. Templates that use includes, runtime resolvers, locale or media variants, or other dynamic features use the full Qute evaluator instead. You don't choose between the two paths; the derive does.
+
+High-throughput callers can reuse one output buffer across renders:
 
 ```rust
-use radiant::Engine;
-
-# use radiant::{Template, TemplateValue};
-# #[derive(TemplateValue)] struct Product { name: String, price: i64 }
-# #[derive(Template)] #[template(path = "checked.html")]
-# struct ProductsPage<'a> { title: &'a str, items: &'a [Product] }
-# async fn example() -> Result<(), radiant::RenderError> {
 let engine = Engine::new()?;
 let mut output = String::new();
-engine.render_into(
-    ProductsPage { title: "Products", items: &[] },
-    &mut output,
-).await?;
-# Ok(())
-# }
+
+engine
+    .render_into(ProductsPage { title: "Products", products: &[] }, &mut output)
+    .await?;
 ```
 
 ## Axum
@@ -80,63 +98,78 @@ use axum::{Router, routing::get};
 use radiant::Engine;
 use radiant_axum::{RenderRejection, Renderer, TemplateResponse};
 
-async fn products(
-    renderer: Renderer,
-) -> Result<TemplateResponse, RenderRejection> {
-    renderer.render(ProductsPage { title: "Products", products: &[] }).await
+async fn products(renderer: Renderer) -> Result<TemplateResponse, RenderRejection> {
+    renderer
+        .render(ProductsPage { title: "Products", products: &[] })
+        .await
 }
 
-# fn router() -> Router {
-Router::new()
-    .route("/products", get(products))
-    .with_state(Engine::new().expect("valid engine"))
-# }
+fn router() -> Router {
+    Router::new()
+        .route("/products", get(products))
+        .with_state(Engine::new().expect("valid engine"))
+}
 ```
 
-`Renderer` negotiates HTML, text, JSON, or XML from `Accept`, selects locale variants from `Accept-Language`, and sets `Content-Type` and `Content-Language`. Unsupported representations return 406. Add `RenderDeadline` to request extensions to enforce a rendering timeout. `Renderer::render` buffers before sending headers so errors become clean HTTP responses; `Renderer::stream` defers rendering to the response body when that trade-off is appropriate.
+`Renderer` does the following:
+
+- negotiates HTML, text, JSON or XML from the `Accept` header, and returns 406 for unsupported representations
+- selects locale variants from `Accept-Language`
+- sets `Content-Type` and `Content-Language` on the response
+- enforces a rendering timeout when a `RenderDeadline` is present in request extensions
+
+`Renderer::render` buffers the whole template before sending headers, so a render error becomes a clean HTTP error response. `Renderer::stream` defers rendering to the response body; use it when time to first byte matters more than clean error handling.
 
 ## Template language
 
 Radiant supports the Qute concepts that compose cleanly in Rust:
 
-- strict expressions, member/index access, calls, arithmetic, comparisons, `&&`, `||`, `!`, safe lookup (`??`), and Elvis defaults (`?:`)
-- `{#if}`, `{#for}`/`{#each}`, `{#let}`/`{#set}`, and `{#when}`/`{#switch}` sections
-- includes, insert blocks, layouts, fragments, isolated tag templates, and include-cycle detection
-- comments (`{! ... !}`), unparsed blocks (`{| ... |}`), and parameter declarations (`{@Type name}`)
+- strict expressions with member and index access, calls, arithmetic, comparisons, `&&`, `||` and `!`
+- safe lookup (`??`) and Elvis defaults (`?:`)
+- `{#if}`, `{#for}`/`{#each}`, `{#let}`/`{#set}` and `{#when}`/`{#switch}` sections
+- includes, insert blocks, layouts, fragments, isolated tag templates and include-cycle detection
+- comments (`{! ... !}`), unparsed blocks (`{| ... |}`) and parameter declarations (`{@Type name}`)
 - asynchronous value and namespace resolvers with deterministic priorities
-- media-aware HTML, XML, and JSON string escaping with explicit `SafeHtml`, `SafeXml`, and `SafeJsonString` wrappers
-- media variants such as `invoice.html` and `invoice.json`, plus locale variants such as `invoice.fr.html`
-- locale-aware message namespaces with deterministic exact-language, base-language, and default fallbacks
+- media-aware HTML, XML and JSON string escaping, with `SafeHtml`, `SafeXml` and `SafeJsonString` wrappers for content you've already escaped
+- media variants such as `invoice.html` and `invoice.json`, and locale variants such as `invoice.fr.html`
+- locale-aware message namespaces with exact-language, base-language and default fallbacks
 
-Runtime templates use exactly the same parser and evaluator:
+### Runtime templates
+
+Runtime templates use the same parser and evaluator as checked templates:
 
 ```rust
-# use radiant::Engine;
-# async fn example() -> Result<(), radiant::RenderError> {
 let engine = Engine::builder()
     .template("greeting.txt", "Hello {name ?: 'world'}")
     .build()?;
-let output = engine.template("greeting").await?
+
+let output = engine
+    .template("greeting")
+    .await?
     .data("name", "Mina")
     .render()
     .await?;
-# Ok(())
-# }
 ```
 
-Use `FileLoader` for templates loaded on demand. `Engine::reload` and `Engine::replace` provide explicit development-time refresh without a hidden watcher or global cache.
+Use `FileLoader` to load templates from disk on demand. `Engine::reload` and `Engine::replace` refresh templates explicitly during development; there is no hidden watcher or global cache.
 
-Enable the `serde` feature to convert intentionally dynamic data with `Value::from_serialize`. Serde isn't required for checked templates or the core value model.
+Enable the `serde` feature to convert dynamic data with `Value::from_serialize`. Serde isn't required for checked templates or the core value model.
 
 ## Security model
 
-Rendering is strict by default: unresolved values are errors unless made safe with `??` or handled with `?:`. Template IDs cannot be absolute or escape their configured root. Engines cap include depth and output size and report structured errors with source spans and render stacks.
+Rendering is strict by default: unresolved values are errors unless made safe with `??` or handled with `?:`. Template IDs can't be absolute or escape their configured root. Engines cap include depth and output size, and report structured errors with source spans and render stacks.
 
-For user-authored templates, start with `EngineBuilder::restricted()`. It disables includes and tag invocation, permits only data-oriented sections and the `data:` namespace, and lowers the output limit. Additional sections and namespaces must be opted into explicitly.
+For templates written by end users, start from `Engine::builder().restricted()`. A restricted engine disables includes and tag invocation, permits only data-oriented sections and the `data:` namespace, and lowers the output limit. You must opt in to any additional sections or namespaces explicitly.
 
-## Validation
+## Development
 
 ```console
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+The design rationale, including how Radiant maps Qute concepts onto Rust and Axum, is in [`docs/research`](docs/research/).
+
+## Licence
+
+Licensed under either of the [MIT licence](LICENSE-MIT) or the [Apache License, Version 2.0](LICENSE-APACHE), at your option.
