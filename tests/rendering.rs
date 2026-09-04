@@ -60,7 +60,7 @@ fn checked_template_renders_typed_data_and_escapes_html() {
     assert_eq!(rendered.media_type(), MediaType::Html);
     assert_eq!(
         rendered.to_string(),
-        "<h1>Tools &amp; weapons</h1>\n\n<p>&lt;Sword&gt;: 10</p>\n\n"
+        "<h1>Tools &amp; weapons</h1>\n\n<p>&lt;Sword&gt;: 10 (true/false/odd)</p>\n\n"
     );
 }
 
@@ -85,7 +85,7 @@ fn checked_template_can_append_to_a_reusable_buffer() {
     assert_eq!(media_type, MediaType::Html);
     assert_eq!(
         output,
-        "prefix:<h1>Tools</h1>\n\n<p>&lt;Hammer&gt;: 12</p>\n\n"
+        "prefix:<h1>Tools</h1>\n\n<p>&lt;Hammer&gt;: 12 (true/false/odd)</p>\n\n"
     );
 }
 
@@ -142,6 +142,31 @@ fn loops_support_positive_integers() {
     )
     .unwrap();
     assert_eq!(rendered.to_string(), "123");
+}
+
+#[test]
+fn loops_expose_qute_parity_metadata() {
+    let engine = Engine::builder()
+        .template(
+            "parity.txt",
+            "{#for item in items}{item_odd}:{item_even}:{item_indexParity};{/for}",
+        )
+        .build()
+        .unwrap();
+    let rendered = block_on(
+        block_on(engine.template("parity.txt"))
+            .unwrap()
+            .data(
+                "items",
+                Value::Sequence(vec![
+                    Value::String("one".into()),
+                    Value::String("two".into()),
+                ]),
+            )
+            .render(),
+    )
+    .unwrap();
+    assert_eq!(rendered.to_string(), "true:false:odd;false:true:even;");
 }
 
 #[test]

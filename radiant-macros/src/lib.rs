@@ -367,6 +367,14 @@ impl DirectCompiler {
             format!("{alias}_hasNext"),
             quote!(#iterator.peek().is_some()),
         );
+        self.roots
+            .insert(format!("{alias}_odd"), quote!(#index % 2 == 0));
+        self.roots
+            .insert(format!("{alias}_even"), quote!(#index % 2 != 0));
+        self.roots.insert(
+            format!("{alias}_indexParity"),
+            quote!(if #index % 2 == 0 { "odd" } else { "even" }),
+        );
         let body = self.nodes(&section.blocks.first()?.nodes)?;
         self.roots = old_roots;
         let alternative =

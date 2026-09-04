@@ -691,6 +691,12 @@ impl Engine {
             scope.insert(format!("{alias}_isFirst"), Value::Bool(index == 0));
             scope.insert(format!("{alias}_isLast"), Value::Bool(index + 1 == length));
             scope.insert(format!("{alias}_hasNext"), Value::Bool(index + 1 < length));
+            scope.insert(format!("{alias}_odd"), Value::Bool(index % 2 == 0));
+            scope.insert(format!("{alias}_even"), Value::Bool(index % 2 != 0));
+            scope.insert(
+                format!("{alias}_indexParity"),
+                Value::String(if index % 2 == 0 { "odd" } else { "even" }.into()),
+            );
             state.scopes.push(Value::Map(scope));
             if let Some(block) = section.blocks.first() {
                 self.render_nodes(&block.nodes, template, state, output)
