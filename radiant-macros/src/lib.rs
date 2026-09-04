@@ -1,12 +1,13 @@
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     env, fs,
     path::{Component, Path, PathBuf},
 };
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
-use quote::quote;
+use quote::{format_ident, quote};
+use radiant_compiler::{ArgumentValue, Expr, Literal, Node, UnaryOp};
 use syn::{
     Attribute, Data, DeriveInput, Error, Fields, LitStr, Result, parse_macro_input,
     spanned::Spanned,
@@ -178,7 +179,9 @@ fn expand_template(input: DeriveInput) -> Result<proc_macro2::TokenStream> {
         }
         return Err(error);
     }
+    let fields = template_fields(&input)?;
     let entries = map_entries(&input, "template", None)?;
+    let direct = direct_renderer(&loader.sources[0].source, &fields);
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let ids: Vec<LitStr> = loader
@@ -209,8 +212,200 @@ fn expand_template(input: DeriveInput) -> Result<proc_macro2::TokenStream> {
                 #(const _: &[u8] = include_bytes!(#paths);)*
                 &[#(::radiant::EmbeddedSource { id: #ids, source: #sources }),*]
             }
+            #direct
         }
     })
+}
+
+fn template_fields(input: &DeriveInput) -> Result<BTreeMap<String, syn::Ident>> {
+    let mut result = BTreeMap::new();
+    for field in named_fields(input)? {
+        let Some(ident) = field.ident.as_ref() else {
+            return Err(Error::new(field.span(), "expected a named field"));
+        };
+        let FieldAttr::Keep(rename) = field_attr(&field.attrs, "template")? else {
+            continue;
+        };
+        result.insert(rename.unwrap_or_else(|| ident.to_string()), ident.clone());
+    }
+    Ok(result)
+}
+
+fn direct_renderer(
+    source: &str,
+    fields: &BTreeMap<String, syn::Ident>,
+) -> Option<proc_macro2::TokenStream> {
+    let template = radiant_compiler::parse("direct", source).ok()?;
+    let roots = fields
+        .iter()
+        .map(|(name, ident)| (name.clone(), quote!(&self.#ident)))
+        .collect();
+    let mut compiler = DirectCompiler {
+        roots,
+        next_loop: 0,
+    };
+    let body = compiler.nodes(&template.nodes)?;
+    let size_hint = source.len();
+    Some(quote! {
+        fn render_direct(
+            &self,
+            __radiant_media_type: ::radiant::MediaType,
+            __radiant_output: &mut ::std::string::String,
+        ) -> ::std::option::Option<::std::result::Result<(), ::radiant::RenderError>> {
+            use ::radiant::__private::{RenderValue as _, Truthy as _};
+            __radiant_output.reserve(#size_hint);
+            #body
+            ::std::option::Option::Some(::std::result::Result::Ok(()))
+        }
+    })
+}
+
+struct DirectCompiler {
+    roots: BTreeMap<String, proc_macro2::TokenStream>,
+    next_loop: usize,
+}
+
+impl DirectCompiler {
+    fn nodes(&mut self, nodes: &[Node]) -> Option<proc_macro2::TokenStream> {
+        let mut statements = Vec::new();
+        let mut text = String::new();
+        for node in nodes {
+            match node {
+                Node::Text { value, .. } | Node::Unparsed { value, .. } => text.push_str(value),
+                Node::Comment { .. } | Node::Parameter(_) => {}
+                Node::Output { expression, .. } => {
+                    Self::flush_text(&mut text, &mut statements);
+                    let expression = self.expression(expression)?;
+                    statements.push(quote! {
+                        (#expression).render_value(__radiant_media_type, __radiant_output);
+                    });
+                }
+                Node::Section(section) if section.name == "if" => {
+                    Self::flush_text(&mut text, &mut statements);
+                    let condition = match &section.arguments.first()?.value {
+                        ArgumentValue::Expression(expression) => self.expression(expression)?,
+                        _ => return None,
+                    };
+                    let body = self.nodes(&section.blocks.first()?.nodes)?;
+                    let alternative = if let Some(block) =
+                        section.blocks.iter().find(|block| block.name == "else")
+                    {
+                        self.nodes(&block.nodes)?
+                    } else {
+                        proc_macro2::TokenStream::new()
+                    };
+                    statements.push(quote! {
+                        if (#condition).is_truthy() { #body } else { #alternative }
+                    });
+                }
+                Node::Section(section) if matches!(section.name.as_str(), "for" | "each") => {
+                    Self::flush_text(&mut text, &mut statements);
+                    statements.push(self.loop_section(section)?);
+                }
+                Node::Section(_) => return None,
+            }
+        }
+        Self::flush_text(&mut text, &mut statements);
+        Some(quote!(#(#statements)*))
+    }
+
+    fn flush_text(text: &mut String, statements: &mut Vec<proc_macro2::TokenStream>) {
+        if !text.is_empty() {
+            statements.push(quote!(__radiant_output.push_str(#text);));
+            text.clear();
+        }
+    }
+
+    fn loop_section(
+        &mut self,
+        section: &radiant_compiler::Section,
+    ) -> Option<proc_macro2::TokenStream> {
+        let alias = section
+            .arguments
+            .iter()
+            .find(|argument| argument.name.as_deref() == Some("alias"))?
+            .static_text()?
+            .to_owned();
+        let source = section
+            .arguments
+            .iter()
+            .find(|argument| argument.name.as_deref() == Some("in"))?;
+        let ArgumentValue::Expression(source) = &source.value else {
+            return None;
+        };
+        let source = self.expression(source)?;
+        let loop_number = self.next_loop;
+        self.next_loop += 1;
+        let iterator = format_ident!("__radiant_iterator_{loop_number}");
+        let item = format_ident!("__radiant_item_{loop_number}");
+        let index = format_ident!("__radiant_index_{loop_number}");
+
+        let old_roots = self.roots.clone();
+        self.roots.insert(alias.clone(), quote!(#item));
+        self.roots.insert(format!("{alias}_index"), quote!(#index));
+        self.roots
+            .insert(format!("{alias}_count"), quote!(#index + 1));
+        self.roots
+            .insert(format!("{alias}_isFirst"), quote!(#index == 0));
+        self.roots.insert(
+            format!("{alias}_isLast"),
+            quote!(#iterator.peek().is_none()),
+        );
+        self.roots.insert(
+            format!("{alias}_hasNext"),
+            quote!(#iterator.peek().is_some()),
+        );
+        let body = self.nodes(&section.blocks.first()?.nodes)?;
+        self.roots = old_roots;
+        let alternative =
+            if let Some(block) = section.blocks.iter().find(|block| block.name == "else") {
+                self.nodes(&block.nodes)?
+            } else {
+                proc_macro2::TokenStream::new()
+            };
+
+        Some(quote! {
+            let mut #iterator = (#source).iter().peekable();
+            if #iterator.peek().is_none() {
+                #alternative
+            } else {
+                let mut #index = 0usize;
+                while let ::std::option::Option::Some(#item) = #iterator.next() {
+                    #body
+                    #index += 1;
+                }
+            }
+        })
+    }
+
+    fn expression(&self, expression: &Expr) -> Option<proc_macro2::TokenStream> {
+        match expression {
+            Expr::Identifier { name, .. } => self.roots.get(name).cloned(),
+            Expr::Member { object, member, .. } => {
+                let object = self.expression(object)?;
+                let member = syn::parse_str::<syn::Ident>(member).ok()?;
+                Some(quote!(&(#object).#member))
+            }
+            Expr::Literal { value, .. } => Some(match value {
+                Literal::Null => return None,
+                Literal::Bool(value) => quote!(#value),
+                Literal::String(value) => quote!(#value),
+                Literal::Integer(value) => quote!(#value),
+                Literal::Float(value) => quote!(#value),
+            }),
+            Expr::Unary { op, expression, .. } => {
+                let expression = self.expression(expression)?;
+                Some(match op {
+                    UnaryOp::Not => quote!(!(#expression).is_truthy()),
+                    UnaryOp::Negate => return None,
+                })
+            }
+            Expr::Binary { .. } => None,
+            Expr::Namespace { .. } | Expr::Call { .. } | Expr::Index { .. } | Expr::Safe { .. } => {
+                None
+            }
+        }
+    }
 }
 
 struct Source {

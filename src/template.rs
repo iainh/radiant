@@ -15,6 +15,15 @@ pub trait Template: Send {
     const ID: &'static str;
     fn data(&self) -> Value;
     fn sources() -> &'static [EmbeddedSource];
+
+    #[doc(hidden)]
+    fn render_direct(
+        &self,
+        _media_type: MediaType,
+        _output: &mut String,
+    ) -> Option<Result<(), RenderError>> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

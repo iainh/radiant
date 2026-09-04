@@ -16,8 +16,10 @@ resolver = "2"
 [dependencies]
 bytes = "1"
 futures-util = "0.3"
+itoa = "1"
 radiant-compiler = { path = "radiant-compiler" }
 radiant-macros = { path = "radiant-macros" }
+ryu = "1"
 serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 

@@ -153,6 +153,18 @@ macro_rules! integers {
 
 integers!(i8, i16, i32, i64, isize, u8, u16, u32);
 
+impl IntoValue for usize {
+    fn into_value(self) -> Value {
+        i64::try_from(self).map_or_else(|_| Value::Float(self as f64), Value::Integer)
+    }
+}
+
+impl IntoValue for &usize {
+    fn into_value(self) -> Value {
+        (*self).into_value()
+    }
+}
+
 impl IntoValue for u64 {
     fn into_value(self) -> Value {
         i64::try_from(self).map_or_else(|_| Value::Float(self as f64), Value::Integer)

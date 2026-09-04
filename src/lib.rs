@@ -16,6 +16,8 @@ pub use engine::{
     RenderBuilder, RenderOptions, Resolution, TemplateLoader, ValueResolver,
 };
 pub use error::{ErrorCode, RenderError};
+#[doc(hidden)]
+pub use escape::private as __private;
 pub use escape::{SafeHtml, SafeJsonString, SafeXml};
 pub use messages::{MessageBundle, MessageBundleBuilder};
 pub use template::{

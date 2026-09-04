@@ -330,6 +330,14 @@ impl Engine {
         self.render_with(template).render().await
     }
 
+    pub async fn render_into<T: Template>(
+        &self,
+        template: T,
+        output: &mut String,
+    ) -> Result<MediaType, RenderError> {
+        self.render_with(template).render_into(output).await
+    }
+
     #[must_use]
     pub fn render_with<T: Template>(&self, template: T) -> RenderBuilder<T> {
         RenderBuilder {
@@ -1214,10 +1222,62 @@ impl<T: Template> RenderBuilder<T> {
     }
 
     pub async fn render(self) -> Result<Rendered, RenderError> {
+        let media_type = MediaType::from_template_id(T::ID);
+        let mut output = String::new();
+        if self.options.media_type.is_none()
+            && self.options.language.is_none()
+            && self.engine.inner.resolvers.is_empty()
+            && self.engine.inner.namespaces.is_empty()
+            && let Some(result) = self.template.render_direct(media_type, &mut output)
+        {
+            result?;
+            self.check_output_size(output.len())?;
+            return Ok(Rendered::new(output, media_type, None));
+        }
         self.engine.register_embedded(T::sources())?;
         self.engine
             .render_value(T::ID, self.template.data(), self.options)
             .await
+    }
+
+    /// Appends this template to an existing buffer, retaining its allocation
+    /// for subsequent renders.
+    pub async fn render_into(self, output: &mut String) -> Result<MediaType, RenderError> {
+        let start = output.len();
+        let media_type = MediaType::from_template_id(T::ID);
+        if self.options.media_type.is_none()
+            && self.options.language.is_none()
+            && self.engine.inner.resolvers.is_empty()
+            && self.engine.inner.namespaces.is_empty()
+            && let Some(result) = self.template.render_direct(media_type, output)
+        {
+            if let Err(error) = result.and_then(|()| self.check_output_size(output.len() - start)) {
+                output.truncate(start);
+                return Err(error);
+            }
+            return Ok(media_type);
+        }
+        self.engine.register_embedded(T::sources())?;
+        let rendered = self
+            .engine
+            .render_value(T::ID, self.template.data(), self.options)
+            .await?;
+        output.push_str(&String::from_utf8_lossy(rendered.as_bytes()));
+        Ok(rendered.media_type())
+    }
+
+    fn check_output_size(&self, length: usize) -> Result<(), RenderError> {
+        if length > self.engine.inner.max_output_bytes {
+            Err(RenderError::new(
+                ErrorCode::OutputLimit,
+                format!(
+                    "rendered output exceeded {} bytes",
+                    self.engine.inner.max_output_bytes
+                ),
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
 

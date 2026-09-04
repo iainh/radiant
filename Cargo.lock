@@ -301,8 +301,10 @@ dependencies = [
  "bytes",
  "futures-executor",
  "futures-util",
+ "itoa",
  "radiant-compiler",
  "radiant-macros",
+ "ryu",
  "serde",
  "serde_json",
 ]

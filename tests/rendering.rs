@@ -46,6 +46,31 @@ fn checked_template_renders_typed_data_and_escapes_html() {
 }
 
 #[test]
+fn checked_template_can_append_to_a_reusable_buffer() {
+    let engine = Engine::new().unwrap();
+    let items = vec![Item {
+        name: "<Hammer>".into(),
+        price: 12,
+    }];
+    let mut output = String::from("prefix:");
+
+    let media_type = block_on(engine.render_into(
+        CheckedPage {
+            title: "Tools",
+            items: &items,
+        },
+        &mut output,
+    ))
+    .unwrap();
+
+    assert_eq!(media_type, MediaType::Html);
+    assert_eq!(
+        output,
+        "prefix:<h1>Tools</h1>\n\n<p>&lt;Hammer&gt;: 12</p>\n\n"
+    );
+}
+
+#[test]
 fn checked_template_graphs_embed_fragment_dependencies() {
     let rendered = block_on(
         Engine::new()
