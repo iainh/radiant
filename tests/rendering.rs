@@ -232,6 +232,27 @@ fn layouts_and_fragments_compose_without_global_state() {
 }
 
 #[test]
+fn user_tags_bind_positional_and_named_arguments() {
+    let engine = Engine::builder()
+        .template(
+            "tags/item.html",
+            "{it}:{item}:{label}:{_args.size}:{_args.item}:{_args.label}",
+        )
+        .template("page.html", "{#item item label='detail' /}")
+        .build()
+        .unwrap();
+
+    let rendered = block_on(
+        block_on(engine.template("page.html"))
+            .unwrap()
+            .data("item", "chair")
+            .render(),
+    )
+    .unwrap();
+    assert_eq!(rendered.to_string(), "chair:chair:detail:2:chair:detail");
+}
+
+#[test]
 fn fragment_visibility_and_capture_match_qute() {
     let engine = Engine::builder()
         .template(

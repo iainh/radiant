@@ -774,7 +774,11 @@ impl Engine {
             return Err(error);
         }
         let included = self.compiled(&id).ok_or_else(|| missing_template(&id))?;
-        let params = self.include_parameters(section, template, state).await?;
+        let params = if tag {
+            self.tag_parameters(section, template, state).await?
+        } else {
+            self.include_parameters(section, template, state).await?
+        };
         let isolated = tag
             || section.arguments.iter().any(|argument| {
                 argument.name.as_deref() == Some("_isolated")
@@ -833,6 +837,44 @@ impl Engine {
                 self.argument(Some(argument), template, state).await?,
             );
         }
+        Ok(values)
+    }
+
+    async fn tag_parameters(
+        &self,
+        section: &Section,
+        template: &radiant_compiler::Template,
+        state: &mut RenderState,
+    ) -> Result<BTreeMap<String, Value>, RenderError> {
+        let mut values = BTreeMap::new();
+        let mut arguments = BTreeMap::new();
+        let mut positional = 0;
+        for argument in &section.arguments {
+            if argument
+                .name
+                .as_deref()
+                .is_some_and(|name| name.starts_with('_'))
+            {
+                continue;
+            }
+            let value = self.argument(Some(argument), template, state).await?;
+            if let Some(name) = &argument.name {
+                values.insert(name.clone(), value.clone());
+                arguments.insert(name.clone(), value);
+            } else {
+                if positional == 0 {
+                    values.insert("it".into(), value.clone());
+                }
+                if let ArgumentValue::Expression(Expr::Identifier { name, .. }) = &argument.value {
+                    values.insert(name.clone(), value.clone());
+                    arguments.insert(name.clone(), value);
+                } else {
+                    arguments.insert(positional.to_string(), value);
+                }
+                positional += 1;
+            }
+        }
+        values.insert("_args".into(), Value::Map(arguments));
         Ok(values)
     }
 
@@ -1359,10 +1401,6 @@ impl RenderState {
 fn resolve_builtin(base: &Value, name: &str, arguments: &[Value]) -> Resolution<Value> {
     let no_arguments = arguments.is_empty();
     match (base, name) {
-        (Value::Map(values), key) if no_arguments => values
-            .get(key)
-            .cloned()
-            .map_or(Resolution::NotFound, Resolution::Value),
         (Value::Map(values), "size" | "length") if no_arguments => {
             Resolution::Value(Value::Integer(values.len() as i64))
         }
@@ -1375,6 +1413,10 @@ fn resolve_builtin(base: &Value, name: &str, arguments: &[Value]) -> Resolution<
         (Value::Map(values), "values") if no_arguments => {
             Resolution::Value(Value::Sequence(values.values().cloned().collect()))
         }
+        (Value::Map(values), key) if no_arguments => values
+            .get(key)
+            .cloned()
+            .map_or(Resolution::NotFound, Resolution::Value),
         (Value::Sequence(values), "size" | "length") if no_arguments => {
             Resolution::Value(Value::Integer(values.len() as i64))
         }
