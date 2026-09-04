@@ -307,6 +307,25 @@ fn user_tag_bodies_use_caller_scope_and_support_isolation_opt_out() {
 }
 
 #[test]
+fn unknown_sections_report_the_original_tag_location() {
+    let engine = Engine::builder()
+        .template("unknown.html", "line one\n{#typo /}")
+        .build()
+        .unwrap();
+
+    let error = block_on(
+        block_on(engine.template("unknown.html"))
+            .unwrap()
+            .instance()
+            .render(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::UnknownSection);
+    assert_eq!(error.template.as_deref(), Some("unknown.html"));
+    assert_eq!((error.line, error.column), (Some(2), Some(1)));
+}
+
+#[test]
 fn fragment_visibility_and_capture_match_qute() {
     let engine = Engine::builder()
         .template(

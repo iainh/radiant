@@ -779,9 +779,26 @@ impl Engine {
             state.scopes.pop();
             return result;
         }
-        let id = self
+        let id = match self
             .resolve_template_id(&id, Some(state.media_type), state.language.as_deref())
-            .await?;
+            .await
+        {
+            Ok(id) => id,
+            Err(error)
+                if tag
+                    && matches!(
+                        error.code,
+                        ErrorCode::MissingTemplate | ErrorCode::NotAcceptable
+                    ) =>
+            {
+                return Err(RenderError::new(
+                    ErrorCode::UnknownSection,
+                    format!("no user tag is registered for section `{}`", section.name),
+                )
+                .at(template, section.span));
+            }
+            Err(error) => return Err(error),
+        };
         if state.include_stack.contains(&id) {
             let mut stack = state.include_stack.clone();
             stack.push(id.clone());
