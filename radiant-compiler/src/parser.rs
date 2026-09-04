@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use crate::{
-    Argument, ArgumentValue, Block, Diagnostic, Node, Parameter, Section, Span, Template,
+    Argument, ArgumentValue, Block, Diagnostic, Expr, Literal, Node, Parameter, Section, Span,
+    Template,
     expr::{make_diag, parse_expression},
 };
 
@@ -251,19 +252,45 @@ impl Parser<'_> {
     }
 
     fn parameter(&mut self, decl: &str, span: Span, nodes: &mut Vec<Node>) {
-        let mut parts = decl.split_whitespace();
-        match (parts.next(), parts.next(), parts.next()) {
-            (Some(type_name), Some(name), None) => nodes.push(Node::Parameter(Parameter {
-                type_name: type_name.into(),
-                name: name.into(),
-                span,
-            })),
-            _ => self.error(
+        let Some(type_end) = decl.find(char::is_whitespace) else {
+            self.error(
                 "E_PARAMETER",
-                "parameter declaration must be `{@Type name}`",
+                "parameter declaration must be `{@Type name}` or `{@Type name=default}`",
                 span,
-            ),
+            );
+            return;
+        };
+        let type_name = &decl[..type_end];
+        let binding = decl[type_end..].trim();
+        let (name, default) = if let Some(equals) = top_level_equals(binding) {
+            let name = binding[..equals].trim();
+            let expression = binding[equals + 1..].trim();
+            let base = span.start + decl.find(expression).unwrap_or(type_end + equals + 1);
+            (name, Some(self.expression_argument(None, expression, base)))
+        } else {
+            (binding, None)
+        };
+        if name.is_empty() || name.chars().any(char::is_whitespace) {
+            self.error(
+                "E_PARAMETER",
+                "parameter declaration must be `{@Type name}` or `{@Type name=default}`",
+                span,
+            );
+            return;
         }
+        nodes.push(Node::Parameter(Parameter {
+            type_name: type_name.into(),
+            name: name.into(),
+            default: default.and_then(|argument| match argument.value {
+                ArgumentValue::Expression(expression) => Some(expression),
+                ArgumentValue::String(value) => Some(Expr::Literal {
+                    value: Literal::String(value),
+                    span: argument.span,
+                }),
+                ArgumentValue::Raw(_) => None,
+            }),
+            span,
+        }));
     }
 
     fn arguments(&mut self, section: &str, text: &str, base: usize) -> Vec<Argument> {

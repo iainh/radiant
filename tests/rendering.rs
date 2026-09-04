@@ -129,6 +129,36 @@ fn dynamic_sections_preserve_scope_and_loop_metadata() {
 }
 
 #[test]
+fn parameter_defaults_and_conditional_let_preserve_values() {
+    let engine = Engine::builder()
+        .template(
+            "defaults.txt",
+            "{@String greeting='Hello'}{greeting}|{#let name?='guest'}{name}{/let}",
+        )
+        .build()
+        .unwrap();
+
+    let missing = block_on(
+        block_on(engine.template("defaults.txt"))
+            .unwrap()
+            .instance()
+            .render(),
+    )
+    .unwrap();
+    assert_eq!(missing.to_string(), "Hello|guest");
+
+    let supplied = block_on(
+        block_on(engine.template("defaults.txt"))
+            .unwrap()
+            .data("greeting", "Hi")
+            .data("name", "Ada")
+            .render(),
+    )
+    .unwrap();
+    assert_eq!(supplied.to_string(), "Hi|Ada");
+}
+
+#[test]
 fn else_if_blocks_select_the_first_truthy_condition() {
     let engine = Engine::builder()
         .template(

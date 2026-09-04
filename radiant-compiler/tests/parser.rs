@@ -33,6 +33,17 @@ fn parses_nested_sections_and_expression_precedence() {
 }
 
 #[test]
+fn parses_parameter_defaults() {
+    let template = parse("params", "{@String name = fallback ?: 'guest'}{name}").unwrap();
+    let Node::Parameter(parameter) = &template.nodes[0] else {
+        panic!("expected parameter declaration")
+    };
+    assert_eq!(parameter.type_name, "String");
+    assert_eq!(parameter.name, "name");
+    assert!(parameter.default.is_some());
+}
+
+#[test]
 fn preserves_comments_and_unparsed_content() {
     let template = parse("raw", "a{! hidden {x} !}{| {not.parsed} |}z").unwrap();
     assert!(matches!(&template.nodes[1], Node::Comment { value, .. } if value.contains("hidden")));

@@ -427,7 +427,31 @@ impl Engine {
                     Node::Text { value, .. } | Node::Unparsed { value, .. } => {
                         output.push_str(value);
                     }
-                    Node::Comment { .. } | Node::Parameter(_) => {}
+                    Node::Comment { .. } => {}
+                    Node::Parameter(parameter) => {
+                        if let Some(default) = &parameter.default {
+                            let existing = state.lookup(&parameter.name);
+                            if matches!(
+                                existing,
+                                Resolution::NotFound | Resolution::Value(Value::Null)
+                            ) {
+                                let value = match self.evaluate(default, template, state).await? {
+                                    Resolution::Value(value) => value,
+                                    Resolution::NotFound if self.inner.strict => {
+                                        return Err(RenderError::new(
+                                            ErrorCode::MissingValue,
+                                            "parameter default could not be resolved",
+                                        )
+                                        .at(template, parameter.span));
+                                    }
+                                    Resolution::NotFound => Value::Null,
+                                };
+                                if let Some(Value::Map(scope)) = state.scopes.last_mut() {
+                                    scope.insert(parameter.name.clone(), value);
+                                }
+                            }
+                        }
+                    }
                     Node::Output { expression, span } => {
                         match self.evaluate(expression, template, state).await? {
                             Resolution::Value(value) => {
@@ -509,7 +533,7 @@ impl Engine {
                 }
                 "let" | "set" => {
                     let values = self
-                        .named_arguments(&section.arguments, template, state)
+                        .binding_arguments(&section.arguments, template, state)
                         .await?;
                     state.scopes.push(Value::Map(values));
                     if let Some(block) = section.blocks.first() {
@@ -953,7 +977,7 @@ impl Engine {
         Ok(values)
     }
 
-    async fn named_arguments(
+    async fn binding_arguments(
         &self,
         arguments: &[Argument],
         template: &radiant_compiler::Template,
@@ -961,9 +985,17 @@ impl Engine {
     ) -> Result<BTreeMap<String, Value>, RenderError> {
         let mut values = BTreeMap::new();
         for argument in arguments {
-            if let Some(name) = &argument.name {
+            let Some(name) = &argument.name else {
+                continue;
+            };
+            if let Some(name) = name.strip_suffix('?')
+                && let Resolution::Value(value) = state.lookup(name)
+                && value != Value::Null
+            {
+                values.insert(name.into(), value);
+            } else {
                 values.insert(
-                    name.clone(),
+                    name.strip_suffix('?').unwrap_or(name).into(),
                     self.argument(Some(argument), template, state).await?,
                 );
             }

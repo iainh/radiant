@@ -112,10 +112,11 @@ impl Node {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Parameter {
     pub type_name: String,
     pub name: String,
+    pub default: Option<Expr>,
     pub span: Span,
 }
 
