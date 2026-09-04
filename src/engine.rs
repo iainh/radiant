@@ -895,37 +895,46 @@ impl Engine {
                     }
                 }
                 Expr::Index { object, index, .. } => {
-                    let base = self.required(object, template, state).await?;
-                    let index = self.required(index, template, state).await?;
-                    resolve_index(&base, &index)
+                    match self.evaluate(object, template, state).await? {
+                        Resolution::Value(base) => {
+                            let index = self.required(index, template, state).await?;
+                            resolve_index(&base, &index)
+                        }
+                        Resolution::NotFound => Resolution::NotFound,
+                    }
                 }
                 Expr::Call {
                     callee, arguments, ..
-                } => {
-                    let mut values = Vec::with_capacity(arguments.len());
-                    for argument in arguments {
-                        values.push(self.required(argument, template, state).await?);
+                } => match callee.as_ref() {
+                    Expr::Namespace {
+                        namespace, name, ..
+                    } => {
+                        let mut values = Vec::with_capacity(arguments.len());
+                        for argument in arguments {
+                            values.push(self.required(argument, template, state).await?);
+                        }
+                        self.resolve_namespace(namespace, name, &values, state)
+                            .await?
                     }
-                    match callee.as_ref() {
-                        Expr::Namespace {
-                            namespace, name, ..
-                        } => {
-                            self.resolve_namespace(namespace, name, &values, state)
-                                .await?
+                    Expr::Member { object, member, .. } => {
+                        let base = match self.evaluate(object, template, state).await? {
+                            Resolution::Value(base) => base,
+                            Resolution::NotFound => return Ok(Resolution::NotFound),
+                        };
+                        let mut values = Vec::with_capacity(arguments.len());
+                        for argument in arguments {
+                            values.push(self.required(argument, template, state).await?);
                         }
-                        Expr::Member { object, member, .. } => {
-                            let base = self.required(object, template, state).await?;
-                            self.resolve_member(&base, member, &values).await?
-                        }
-                        _ => {
-                            return Err(RenderError::new(
-                                ErrorCode::Type,
-                                "only namespace and member functions can be called",
-                            )
-                            .at(template, expression.span()));
-                        }
+                        self.resolve_member(&base, member, &values).await?
                     }
-                }
+                    _ => {
+                        return Err(RenderError::new(
+                            ErrorCode::Type,
+                            "only namespace and member functions can be called",
+                        )
+                        .at(template, expression.span()));
+                    }
+                },
                 Expr::Safe { expression, .. } => {
                     match self.evaluate(expression, template, state).await? {
                         Resolution::NotFound => Resolution::Value(Value::Null),

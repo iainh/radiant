@@ -142,7 +142,10 @@ fn else_if_blocks_select_the_first_truthy_condition() {
 #[test]
 fn safe_and_default_expressions_are_explicit() {
     let engine = Engine::builder()
-        .template("safe.html", "{missing??}:{missing ?: 'fallback'}:{trusted}")
+        .template(
+            "safe.html",
+            "{missing??}:{missing ?: 'fallback'}:{missing[0]??}:{missing.call()??}:{trusted}",
+        )
         .build()
         .unwrap();
     let template = block_on(engine.template("safe.html")).unwrap();
@@ -152,7 +155,7 @@ fn safe_and_default_expressions_are_explicit() {
             .render(),
     )
     .unwrap();
-    assert_eq!(rendered.to_string(), ":fallback:<strong>safe</strong>");
+    assert_eq!(rendered.to_string(), ":fallback:::<strong>safe</strong>");
 
     let strict = Engine::builder()
         .template("strict.txt", "before {missing} after")
