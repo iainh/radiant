@@ -171,6 +171,13 @@ fn lex(source_name: &str, whole: &str, input: &str, base: usize) -> Result<Vec<T
                 "null" => Tok::Null,
                 "true" => Tok::Bool(true),
                 "false" => Tok::Bool(false),
+                "eq" | "is" => Tok::Op("=="),
+                "ne" => Tok::Op("!="),
+                "gt" => Tok::Op(">"),
+                "ge" => Tok::Op(">="),
+                "lt" => Tok::Op("<"),
+                "le" => Tok::Op("<="),
+                "and" => Tok::Op("&&"),
                 _ => Tok::Ident(word.into()),
             };
             out.push(Token {

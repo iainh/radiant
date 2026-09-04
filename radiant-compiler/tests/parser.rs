@@ -165,6 +165,16 @@ fn safe_suffix_and_elvis_are_distinct() {
 }
 
 #[test]
+fn parses_qute_textual_operator_aliases() {
+    for expression in [
+        "a eq b", "a is b", "a ne b", "a gt b", "a ge b", "a lt b", "a le b", "a and b",
+    ] {
+        parse("aliases", format!("{{{expression}}}"))
+            .unwrap_or_else(|errors| panic!("failed to parse `{expression}`: {errors:?}"));
+    }
+}
+
+#[test]
 fn parses_else_if_as_a_conditional_block() {
     let template = parse(
         "condition",

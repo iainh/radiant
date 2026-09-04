@@ -332,6 +332,26 @@ fn qute_collection_conveniences_are_available() {
 }
 
 #[test]
+fn qute_textual_operator_aliases_evaluate() {
+    let engine = Engine::builder()
+        .template(
+            "aliases.txt",
+            "{#if value ge 2 and value ne 3}yes{#else}no{/if}",
+        )
+        .build()
+        .unwrap();
+
+    let rendered = block_on(
+        block_on(engine.template("aliases.txt"))
+            .unwrap()
+            .data("value", 2_i64)
+            .render(),
+    )
+    .unwrap();
+    assert_eq!(rendered.to_string(), "yes");
+}
+
+#[test]
 fn layouts_and_fragments_compose_without_global_state() {
     let engine = Engine::builder()
         .template(
