@@ -70,6 +70,17 @@ fn escaped_braces_are_literal_text() {
 }
 
 #[test]
+fn only_qute_tag_starts_open_tags() {
+    let source = r#"{"key":true} { name } {_name}"#;
+    let template = parse("json", source).unwrap();
+
+    assert!(
+        matches!(&template.nodes[0], Node::Text { value, .. } if value == r#"{"key":true} { name } "#)
+    );
+    assert!(matches!(&template.nodes[1], Node::Output { .. }));
+}
+
+#[test]
 fn collects_include_dependencies_and_layout_blocks() {
     let template = parse(
         "page",

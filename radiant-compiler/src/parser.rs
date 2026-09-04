@@ -73,6 +73,19 @@ impl Parser<'_> {
                 self.at = start + 1;
                 continue;
             }
+            let recognized = self.source[start + 1..]
+                .chars()
+                .next()
+                .is_some_and(|character| {
+                    character.is_ascii_alphanumeric()
+                        || character == '_'
+                        || matches!(character, '!' | '|' | '#' | '/' | '@')
+                });
+            if !recognized {
+                self.push_text(&mut nodes, self.at, start + 1);
+                self.at = start + 1;
+                continue;
+            }
             self.push_text(&mut nodes, self.at, start);
             if self.source[start..].starts_with("{!") {
                 let Some(end_rel) = self.source[start + 2..].find("!}") else {
