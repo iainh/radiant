@@ -296,7 +296,7 @@ impl Parser<'_> {
                 self.expression_argument(Some("in".into()), expr, expr_base),
             ];
         }
-        split_arguments(text, base)
+        merge_named_arguments(split_arguments(text, base))
             .into_iter()
             .enumerate()
             .map(|(index, (part, span))| {
@@ -452,6 +452,33 @@ fn split_arguments(text: &str, base: usize) -> Vec<(String, Span)> {
         result.push((text[s..].into(), Span::new(base + s, base + text.len())))
     }
     result
+}
+
+fn merge_named_arguments(arguments: Vec<(String, Span)>) -> Vec<(String, Span)> {
+    let mut merged = Vec::with_capacity(arguments.len());
+    let mut arguments = arguments.into_iter().peekable();
+    while let Some((mut argument, mut span)) = arguments.next() {
+        if argument.ends_with('=') && !argument.ends_with("==") {
+            if let Some((value, value_span)) = arguments.next() {
+                argument.push_str(&value);
+                span.end = value_span.end;
+            }
+        } else if let Some((next, _)) = arguments.peek()
+            && next.starts_with('=')
+            && !next.starts_with("==")
+            && let Some((equals, equals_span)) = arguments.next()
+        {
+            let needs_value = equals == "=";
+            argument.push_str(&equals);
+            span.end = equals_span.end;
+            if needs_value && let Some((value, value_span)) = arguments.next() {
+                argument.push_str(&value);
+                span.end = value_span.end;
+            }
+        }
+        merged.push((argument, span));
+    }
+    merged
 }
 
 pub(crate) fn validate_template(template: &Template) -> Vec<Diagnostic> {

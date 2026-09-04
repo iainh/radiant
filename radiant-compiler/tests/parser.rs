@@ -136,3 +136,28 @@ fn parses_else_if_as_a_conditional_block() {
     ));
     assert!(section.blocks[2].arguments.is_empty());
 }
+
+#[test]
+fn accepts_whitespace_around_named_argument_equals() {
+    let template = parse(
+        "arguments",
+        "{#let first=1 second =2 third= 3 fourth = 'four value'}{/let}",
+    )
+    .unwrap();
+    let Node::Section(section) = &template.nodes[0] else {
+        panic!("expected let section")
+    };
+
+    assert_eq!(
+        section
+            .arguments
+            .iter()
+            .map(|argument| argument.name.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("first"), Some("second"), Some("third"), Some("fourth")]
+    );
+    assert!(matches!(
+        &section.arguments[3].value,
+        ArgumentValue::String(value) if value == "four value"
+    ));
+}

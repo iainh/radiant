@@ -94,7 +94,7 @@ fn dynamic_sections_preserve_scope_and_loop_metadata() {
     let engine = Engine::builder()
         .template(
             "items.txt",
-            "{#for item in items}{item_count}:{item.name};{#else}empty{/for}|{data:label}",
+            "{#for item in items}{item_count}:{item.name};{#else}empty{/for}|{data:label}|{#let value = 'spaced'}{value}{/let}",
         )
         .build()
         .unwrap();
@@ -106,7 +106,7 @@ fn dynamic_sections_preserve_scope_and_loop_metadata() {
     let template = block_on(engine.template("items")).unwrap();
     let rendered = block_on(template.data("items", items).data("label", "root").render()).unwrap();
 
-    assert_eq!(rendered.to_string(), "1:A;|root");
+    assert_eq!(rendered.to_string(), "1:A;|root|spaced");
 }
 
 #[test]
