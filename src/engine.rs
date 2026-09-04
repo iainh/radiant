@@ -543,24 +543,31 @@ impl Engine {
                             .await?;
                     }
                 }
-                "fragment" => {
-                    let hidden = section.arguments.iter().any(|argument| {
+                "fragment" | "capture" => {
+                    let marker_hidden = section.arguments.iter().any(|argument| {
                         argument.name.as_deref() == Some("_hidden")
-                            || (argument.name.as_deref() == Some("rendered")
-                                && matches!(
-                                    argument.value,
-                                    ArgumentValue::Expression(Expr::Literal {
-                                        value: Literal::Bool(false),
-                                        ..
-                                    })
-                                ))
+                            || (argument.name.is_none()
+                                && argument.static_text() == Some("_hidden"))
                     });
+                    let rendered = section
+                        .arguments
+                        .iter()
+                        .find(|argument| argument.name.as_deref() == Some("rendered"));
+                    let hidden = section.name == "capture"
+                        || marker_hidden
+                        || if let Some(rendered) = rendered {
+                            !self
+                                .argument(Some(rendered), template, state)
+                                .await?
+                                .is_truthy()
+                        } else {
+                            false
+                        };
                     if !hidden && let Some(block) = section.blocks.first() {
                         self.render_nodes(&block.nodes, template, state, output)
                             .await?;
                     }
                 }
-                "capture" => {}
                 _ => {
                     self.render_include(section, template, state, output, true)
                         .await?;

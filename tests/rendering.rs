@@ -232,6 +232,36 @@ fn layouts_and_fragments_compose_without_global_state() {
 }
 
 #[test]
+fn fragment_visibility_and_capture_match_qute() {
+    let engine = Engine::builder()
+        .template(
+            "visibility.txt",
+            "{#fragment dynamic rendered=show}D{/fragment}{#fragment marker _hidden}M{/fragment}{#capture captured}C{/capture}|{#include $dynamic /}{#include $marker /}{#include $captured /}",
+        )
+        .build()
+        .unwrap();
+
+    let hidden = block_on(engine.template("visibility.txt"))
+        .unwrap()
+        .data("show", false);
+    assert_eq!(block_on(hidden.render()).unwrap().to_string(), "|DMC");
+
+    let visible = block_on(engine.template("visibility.txt"))
+        .unwrap()
+        .data("show", true);
+    assert_eq!(block_on(visible.render()).unwrap().to_string(), "D|DMC");
+
+    let captured = block_on(engine.template("visibility.txt"))
+        .unwrap()
+        .fragment("captured")
+        .unwrap();
+    assert_eq!(
+        block_on(captured.instance().render()).unwrap().to_string(),
+        "C"
+    );
+}
+
+#[test]
 fn recursive_fragment_includes_are_rejected() {
     let engine = Engine::builder()
         .template(

@@ -161,3 +161,19 @@ fn accepts_whitespace_around_named_argument_equals() {
         ArgumentValue::String(value) if value == "four value"
     ));
 }
+
+#[test]
+fn validates_fragment_and_capture_identifiers_together() {
+    let errors = parse(
+        "fragments",
+        "{#fragment invalid-id}{/fragment}{#fragment same}{/fragment}{#capture same}{/capture}",
+    )
+    .unwrap_err();
+
+    assert!(errors.iter().any(|error| error.code == "E_FRAGMENT_ID"));
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code == "E_DUPLICATE_FRAGMENT")
+    );
+}

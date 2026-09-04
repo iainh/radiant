@@ -300,7 +300,7 @@ impl Parser<'_> {
             .into_iter()
             .enumerate()
             .map(|(index, (part, span))| {
-                if index == 0 && matches!(section, "include" | "fragment") {
+                if index == 0 && matches!(section, "include" | "fragment" | "capture") {
                     let value = quoted(&part)
                         .map_or_else(|| ArgumentValue::Raw(part), ArgumentValue::String);
                     return Argument {
@@ -498,7 +498,7 @@ fn validate_into(template: &Template, diagnostics: &mut Vec<Diagnostic>) {
             if let Node::Section(section) = node {
                 if matches!(
                     section.name.as_str(),
-                    "if" | "for" | "when" | "include" | "fragment"
+                    "if" | "for" | "when" | "include" | "fragment" | "capture"
                 ) && section.arguments.is_empty()
                 {
                     diagnostics.push(make_diag(
@@ -525,17 +525,30 @@ fn validate_into(template: &Template, diagnostics: &mut Vec<Diagnostic>) {
                         ));
                     }
                 }
-                if section.name == "fragment"
+                if matches!(section.name.as_str(), "fragment" | "capture")
                     && let Some(id) = section.arguments.first().and_then(Argument::static_text)
-                    && !fragments.insert(id.into())
                 {
-                    diagnostics.push(make_diag(
-                        &template.name,
-                        &template.source,
-                        "E_DUPLICATE_FRAGMENT",
-                        format!("duplicate fragment `{id}`"),
-                        section.span,
-                    ));
+                    if !id
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+                    {
+                        diagnostics.push(make_diag(
+                            &template.name,
+                            &template.source,
+                            "E_FRAGMENT_ID",
+                            "fragment IDs may contain only ASCII letters, digits, and underscores",
+                            section.arguments[0].span,
+                        ));
+                    }
+                    if !fragments.insert(id.into()) {
+                        diagnostics.push(make_diag(
+                            &template.name,
+                            &template.source,
+                            "E_DUPLICATE_FRAGMENT",
+                            format!("duplicate fragment `{id}`"),
+                            section.span,
+                        ));
+                    }
                 }
                 if section.name == "include" {
                     let mut blocks = HashSet::new();

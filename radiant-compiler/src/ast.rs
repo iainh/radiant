@@ -37,7 +37,7 @@ impl Template {
         fn visit<'a>(nodes: &'a [Node], out: &mut Vec<&'a Section>) {
             for node in nodes {
                 if let Node::Section(section) = node {
-                    if section.name == "fragment" {
+                    if matches!(section.name.as_str(), "fragment" | "capture") {
                         out.push(section);
                     }
                     for block in &section.blocks {
