@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use futures_executor::block_on;
 use futures_util::FutureExt;
 use radiant::{
-    BoxFuture, Engine, ErrorCode, MediaType, MessageBundle, NamespaceContext, NamespaceResolver,
-    Resolution, SafeHtml, Template, TemplateValue, Value,
+    BoxFuture, Engine, ErrorCode, MediaType, MessageBundle, MissingValueStrategy, NamespaceContext,
+    NamespaceResolver, Resolution, SafeHtml, Template, TemplateValue, Value,
 };
 
 #[derive(TemplateValue)]
@@ -276,6 +276,37 @@ fn safe_and_default_expressions_are_explicit() {
     let error = block_on(template.instance().render()).unwrap_err();
     assert_eq!(error.code, ErrorCode::MissingValue);
     assert_eq!(error.line, Some(1));
+}
+
+#[test]
+fn non_strict_missing_value_output_is_configurable() {
+    let qute = Engine::builder()
+        .strict(false)
+        .template("missing.txt", "a{missing}b")
+        .build()
+        .unwrap();
+    let blank = Engine::builder()
+        .missing_value_strategy(MissingValueStrategy::Blank)
+        .template("missing.txt", "a{missing}b")
+        .build()
+        .unwrap();
+
+    let qute_output = block_on(
+        block_on(qute.template("missing.txt"))
+            .unwrap()
+            .instance()
+            .render(),
+    )
+    .unwrap();
+    let blank_output = block_on(
+        block_on(blank.template("missing.txt"))
+            .unwrap()
+            .instance()
+            .render(),
+    )
+    .unwrap();
+    assert_eq!(qute_output.to_string(), "aNOT_FOUNDb");
+    assert_eq!(blank_output.to_string(), "ab");
 }
 
 #[test]

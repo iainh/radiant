@@ -63,6 +63,13 @@ pub trait TemplateLoader: Send + Sync {
     fn load(&self, id: &str) -> Result<Option<String>, Box<dyn Error + Send + Sync>>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingValueStrategy {
+    Strict,
+    NotFound,
+    Blank,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileLoader {
     root: PathBuf,
@@ -113,7 +120,7 @@ struct EngineInner {
     resolvers: Vec<Arc<dyn ValueResolver>>,
     namespaces: Vec<Arc<dyn NamespaceResolver>>,
     loaders: Vec<Arc<dyn TemplateLoader>>,
-    strict: bool,
+    missing_values: MissingValueStrategy,
     max_include_depth: usize,
     max_output_bytes: usize,
     allowed_sections: Option<Vec<String>>,
@@ -125,7 +132,7 @@ pub struct EngineBuilder {
     resolvers: Vec<Arc<dyn ValueResolver>>,
     namespaces: Vec<Arc<dyn NamespaceResolver>>,
     loaders: Vec<Arc<dyn TemplateLoader>>,
-    strict: bool,
+    missing_values: MissingValueStrategy,
     max_include_depth: usize,
     max_output_bytes: usize,
     allowed_sections: Option<Vec<String>>,
@@ -139,7 +146,7 @@ impl Default for EngineBuilder {
             resolvers: Vec::new(),
             namespaces: Vec::new(),
             loaders: Vec::new(),
-            strict: true,
+            missing_values: MissingValueStrategy::Strict,
             max_include_depth: 64,
             max_output_bytes: 8 * 1024 * 1024,
             allowed_sections: None,
@@ -175,7 +182,17 @@ impl EngineBuilder {
 
     #[must_use]
     pub const fn strict(mut self, strict: bool) -> Self {
-        self.strict = strict;
+        self.missing_values = if strict {
+            MissingValueStrategy::Strict
+        } else {
+            MissingValueStrategy::NotFound
+        };
+        self
+    }
+
+    #[must_use]
+    pub const fn missing_value_strategy(mut self, strategy: MissingValueStrategy) -> Self {
+        self.missing_values = strategy;
         self
     }
 
@@ -234,7 +251,7 @@ impl EngineBuilder {
                 resolvers: self.resolvers,
                 namespaces: self.namespaces,
                 loaders: self.loaders,
-                strict: self.strict,
+                missing_values: self.missing_values,
                 max_include_depth: self.max_include_depth,
                 max_output_bytes: self.max_output_bytes,
                 allowed_sections: self.allowed_sections,
@@ -437,7 +454,10 @@ impl Engine {
                             ) {
                                 let value = match self.evaluate(default, template, state).await? {
                                     Resolution::Value(value) => value,
-                                    Resolution::NotFound if self.inner.strict => {
+                                    Resolution::NotFound
+                                        if self.inner.missing_values
+                                            == MissingValueStrategy::Strict =>
+                                    {
                                         return Err(RenderError::new(
                                             ErrorCode::MissingValue,
                                             "parameter default could not be resolved",
@@ -458,14 +478,19 @@ impl Engine {
                                 write_value(&value, state.media_type, output)
                                     .map_err(|error| error.at(template, *span))?;
                             }
-                            Resolution::NotFound if self.inner.strict => {
+                            Resolution::NotFound
+                                if self.inner.missing_values == MissingValueStrategy::Strict =>
+                            {
                                 return Err(RenderError::new(
                                     ErrorCode::MissingValue,
                                     "expression could not be resolved",
                                 )
                                 .at(template, *span));
                             }
-                            Resolution::NotFound => {}
+                            Resolution::NotFound => match self.inner.missing_values {
+                                MissingValueStrategy::NotFound => output.push_str("NOT_FOUND"),
+                                MissingValueStrategy::Blank | MissingValueStrategy::Strict => {}
+                            },
                         }
                     }
                     Node::Section(section) => {
@@ -1037,11 +1062,15 @@ impl Engine {
             ArgumentValue::Expression(expression) => {
                 match self.evaluate(expression, template, state).await? {
                     Resolution::Value(value) => Ok(value),
-                    Resolution::NotFound if self.inner.strict => Err(RenderError::new(
-                        ErrorCode::MissingValue,
-                        "section argument could not be resolved",
-                    )
-                    .at(template, argument.span)),
+                    Resolution::NotFound
+                        if self.inner.missing_values == MissingValueStrategy::Strict =>
+                    {
+                        Err(RenderError::new(
+                            ErrorCode::MissingValue,
+                            "section argument could not be resolved",
+                        )
+                        .at(template, argument.span))
+                    }
                     Resolution::NotFound => Ok(Value::Null),
                 }
             }

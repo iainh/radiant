@@ -12,8 +12,9 @@ mod template;
 mod value;
 
 pub use engine::{
-    BoxFuture, Engine, EngineBuilder, EvalContext, FileLoader, NamespaceContext, NamespaceResolver,
-    RenderBuilder, RenderOptions, Resolution, TemplateLoader, ValueResolver,
+    BoxFuture, Engine, EngineBuilder, EvalContext, FileLoader, MissingValueStrategy,
+    NamespaceContext, NamespaceResolver, RenderBuilder, RenderOptions, Resolution, TemplateLoader,
+    ValueResolver,
 };
 pub use error::{ErrorCode, RenderError};
 #[doc(hidden)]
