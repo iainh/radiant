@@ -525,19 +525,39 @@ impl Engine {
                     self.render_include(section, template, state, output, false)
                         .await?;
                 }
-                "insert" => {
+                "insert" | "nested-content" => {
                     let name = section
                         .arguments
                         .first()
                         .and_then(Argument::static_text)
                         .unwrap_or("");
-                    let override_nodes = state
+                    let override_content = state
                         .overrides
                         .last()
                         .and_then(|overrides| overrides.get(name))
                         .cloned();
-                    if let Some(nodes) = override_nodes {
-                        self.render_nodes(&nodes, template, state, output).await?;
+                    if let Some(override_content) = override_content {
+                        if let Some(scopes) = override_content.scopes {
+                            let saved_scopes = std::mem::replace(&mut state.scopes, scopes);
+                            let result = self
+                                .render_nodes(
+                                    &override_content.nodes,
+                                    &override_content.template,
+                                    state,
+                                    output,
+                                )
+                                .await;
+                            state.scopes = saved_scopes;
+                            result?;
+                        } else {
+                            self.render_nodes(
+                                &override_content.nodes,
+                                &override_content.template,
+                                state,
+                                output,
+                            )
+                            .await?;
+                        }
                     } else if let Some(block) = section.blocks.first() {
                         self.render_nodes(&block.nodes, template, state, output)
                             .await?;
@@ -779,7 +799,19 @@ impl Engine {
         } else {
             self.include_parameters(section, template, state).await?
         };
-        let isolated = tag
+        let unisolated_tag = tag
+            && section.arguments.iter().any(|argument| {
+                (argument.name.is_none() && argument.static_text() == Some("_unisolated"))
+                    || (argument.name.as_deref() == Some("_isolated")
+                        && matches!(
+                            argument.value,
+                            ArgumentValue::Expression(Expr::Literal {
+                                value: Literal::Bool(false),
+                                ..
+                            })
+                        ))
+            });
+        let isolated = (tag && !unisolated_tag)
             || section.arguments.iter().any(|argument| {
                 argument.name.as_deref() == Some("_isolated")
                     && matches!(
@@ -790,16 +822,38 @@ impl Engine {
                         })
                     )
             });
+        let caller_template = self
+            .compiled(&template.name)
+            .expect("the currently rendered template must be registered");
+        let tag_body_scopes = tag.then(|| {
+            let mut scopes = state.scopes.clone();
+            scopes.push(Value::Map(params.clone()));
+            scopes
+        });
         let saved_scopes = isolated.then(|| std::mem::take(&mut state.scopes));
         state.scopes.push(Value::Map(params));
         let mut overrides = HashMap::new();
         if let Some(main) = section.blocks.first()
             && !main.nodes.is_empty()
         {
-            overrides.insert(String::new(), main.nodes.clone());
+            overrides.insert(
+                String::new(),
+                OverrideContent {
+                    nodes: main.nodes.clone(),
+                    template: caller_template.clone(),
+                    scopes: tag_body_scopes,
+                },
+            );
         }
         for block in section.blocks.iter().skip(1) {
-            overrides.insert(block.name.clone(), block.nodes.clone());
+            overrides.insert(
+                block.name.clone(),
+                OverrideContent {
+                    nodes: block.nodes.clone(),
+                    template: caller_template.clone(),
+                    scopes: None,
+                },
+            );
         }
         state.overrides.push(overrides);
         state.include_stack.push(id.clone());
@@ -854,6 +908,10 @@ impl Engine {
                 .name
                 .as_deref()
                 .is_some_and(|name| name.starts_with('_'))
+                || (argument.name.is_none()
+                    && argument
+                        .static_text()
+                        .is_some_and(|name| name.starts_with('_')))
             {
                 continue;
             }
@@ -1363,9 +1421,16 @@ struct RenderState {
     scopes: Vec<Value>,
     root: usize,
     include_stack: Vec<String>,
-    overrides: Vec<HashMap<String, Vec<Node>>>,
+    overrides: Vec<HashMap<String, OverrideContent>>,
     media_type: MediaType,
     language: Option<String>,
+}
+
+#[derive(Clone)]
+struct OverrideContent {
+    nodes: Vec<Node>,
+    template: Arc<radiant_compiler::Template>,
+    scopes: Option<Vec<Value>>,
 }
 
 impl RenderState {

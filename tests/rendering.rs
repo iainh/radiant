@@ -253,6 +253,47 @@ fn user_tags_bind_positional_and_named_arguments() {
 }
 
 #[test]
+fn user_tag_bodies_use_caller_scope_and_support_isolation_opt_out() {
+    let engine = Engine::builder()
+        .template(
+            "tags/wrapper.html",
+            "[{outside??}:{label}:{#nested-content /}:{#insert /}]",
+        )
+        .template(
+            "isolated.html",
+            "{#wrapper label='tag'}{outside}-{label}{/wrapper}",
+        )
+        .template(
+            "unisolated.html",
+            "{#wrapper label='tag' _unisolated}{outside}-{label}{/wrapper}",
+        )
+        .template(
+            "not-isolated.html",
+            "{#wrapper label='tag' _isolated=false}{outside}-{label}{/wrapper}",
+        )
+        .build()
+        .unwrap();
+
+    for (template, prefix) in [
+        ("isolated.html", "[:tag:"),
+        ("unisolated.html", "[caller:tag:"),
+        ("not-isolated.html", "[caller:tag:"),
+    ] {
+        let rendered = block_on(
+            block_on(engine.template(template))
+                .unwrap()
+                .data("outside", "caller")
+                .render(),
+        )
+        .unwrap();
+        assert_eq!(
+            rendered.to_string(),
+            format!("{prefix}caller-tag:caller-tag]")
+        );
+    }
+}
+
+#[test]
 fn fragment_visibility_and_capture_match_qute() {
     let engine = Engine::builder()
         .template(
