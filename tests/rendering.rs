@@ -159,6 +159,27 @@ fn parameter_defaults_and_conditional_let_preserve_values() {
 }
 
 #[test]
+fn with_changes_the_current_context_once() {
+    let engine = Engine::builder()
+        .template("with.txt", "{#with user}{name}:{this.name}{/with}")
+        .build()
+        .unwrap();
+    let user = Value::Map(BTreeMap::from([(
+        "name".into(),
+        Value::String("Ada".into()),
+    )]));
+
+    let rendered = block_on(
+        block_on(engine.template("with.txt"))
+            .unwrap()
+            .data("user", user)
+            .render(),
+    )
+    .unwrap();
+    assert_eq!(rendered.to_string(), "Ada:Ada");
+}
+
+#[test]
 fn else_if_blocks_select_the_first_truthy_condition() {
     let engine = Engine::builder()
         .template(

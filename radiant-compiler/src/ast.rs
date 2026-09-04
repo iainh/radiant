@@ -43,6 +43,7 @@ impl Template {
                             | "each"
                             | "let"
                             | "set"
+                            | "with"
                             | "when"
                             | "switch"
                             | "include"

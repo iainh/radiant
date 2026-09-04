@@ -542,6 +542,17 @@ impl Engine {
                     }
                     state.scopes.pop();
                 }
+                "with" => {
+                    let value = self
+                        .argument(section.arguments.first(), template, state)
+                        .await?;
+                    state.scopes.push(value);
+                    if let Some(block) = section.blocks.first() {
+                        self.render_nodes(&block.nodes, template, state, output)
+                            .await?;
+                    }
+                    state.scopes.pop();
+                }
                 "when" | "switch" => {
                     self.render_when(section, template, state, output).await?;
                 }
