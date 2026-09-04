@@ -31,6 +31,42 @@ impl Template {
         result
     }
 
+    /// Returns unique user-tag template IDs in source order.
+    #[must_use]
+    pub fn tag_dependencies(&self) -> Vec<String> {
+        fn visit(nodes: &[Node], out: &mut Vec<String>) {
+            for node in nodes {
+                if let Node::Section(section) = node {
+                    if !matches!(
+                        section.name.as_str(),
+                        "if" | "for"
+                            | "each"
+                            | "let"
+                            | "set"
+                            | "when"
+                            | "switch"
+                            | "include"
+                            | "insert"
+                            | "nested-content"
+                            | "fragment"
+                            | "capture"
+                    ) {
+                        let id = format!("tags/{}", section.name);
+                        if !out.contains(&id) {
+                            out.push(id);
+                        }
+                    }
+                    for block in &section.blocks {
+                        visit(&block.nodes, out);
+                    }
+                }
+            }
+        }
+        let mut result = Vec::new();
+        visit(&self.nodes, &mut result);
+        result
+    }
+
     /// Returns all fragment sections, including nested declarations.
     #[must_use]
     pub fn fragments(&self) -> Vec<&Section> {

@@ -511,6 +511,9 @@ impl Loader {
                 self.load(template_id, stack);
             }
         }
+        for dependency in template.tag_dependencies() {
+            self.load(&dependency, stack);
+        }
         stack.pop();
     }
 

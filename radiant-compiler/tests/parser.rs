@@ -60,6 +60,21 @@ fn collects_include_dependencies_and_layout_blocks() {
 }
 
 #[test]
+fn collects_user_tag_dependencies_separately_from_builtins() {
+    let template = parse(
+        "page",
+        "{#if shown}{#card item /}{#else}{#include partial /}{/if}{#wrapper}{#nested-content /}{/wrapper}",
+    )
+    .unwrap();
+
+    assert_eq!(template.dependencies(), vec!["partial"]);
+    assert_eq!(
+        template.tag_dependencies(),
+        vec!["tags/card", "tags/wrapper"]
+    );
+}
+
+#[test]
 fn detects_duplicate_fragments_and_named_arguments() {
     let errors = parse(
         "duplicates",

@@ -39,6 +39,12 @@ struct CheckedSelfFragment<'a> {
     title: &'a str,
 }
 
+#[derive(Template)]
+#[template(path = "checked-tag.html")]
+struct CheckedTag<'a> {
+    item: &'a str,
+}
+
 #[test]
 fn checked_template_renders_typed_data_and_escapes_html() {
     let items = vec![Item {
@@ -93,6 +99,13 @@ fn checked_template_graphs_embed_fragment_dependencies() {
     .unwrap();
 
     assert_eq!(rendered.to_string(), "<b>Checked</b>\n");
+}
+
+#[test]
+fn checked_template_graphs_embed_user_tags() {
+    let rendered = block_on(Engine::new().unwrap().render(CheckedTag { item: "Chair" })).unwrap();
+
+    assert_eq!(rendered.to_string(), "<strong>Chair</strong>\n\n");
 }
 
 #[test]
