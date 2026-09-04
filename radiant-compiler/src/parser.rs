@@ -68,6 +68,11 @@ impl Parser<'_> {
                 break;
             };
             let start = self.at + relative;
+            if start > self.at && self.source.as_bytes()[start - 1] == b'\\' {
+                self.push_text(&mut nodes, self.at, start + 1);
+                self.at = start + 1;
+                continue;
+            }
             self.push_text(&mut nodes, self.at, start);
             if self.source[start..].starts_with("{!") {
                 let Some(end_rel) = self.source[start + 2..].find("!}") else {
@@ -164,8 +169,18 @@ impl Parser<'_> {
 
     fn push_text(&self, nodes: &mut Vec<Node>, start: usize, end: usize) {
         if start < end {
+            let text = self.source[start..end]
+                .replace("\\{", "{")
+                .replace("\\}", "}");
+            if let Some(Node::Text { value, span }) = nodes.last_mut()
+                && span.end == start
+            {
+                value.push_str(&text);
+                span.end = end;
+                return;
+            }
             nodes.push(Node::Text {
-                value: self.source[start..end].into(),
+                value: text,
                 span: Span::new(start, end),
             })
         }

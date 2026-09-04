@@ -53,6 +53,16 @@ fn preserves_comments_and_unparsed_content() {
 }
 
 #[test]
+fn escaped_braces_are_literal_text() {
+    let template = parse("braces", r"before \{name\} after {name}").unwrap();
+
+    assert!(
+        matches!(&template.nodes[0], Node::Text { value, .. } if value == "before {name} after ")
+    );
+    assert!(matches!(&template.nodes[1], Node::Output { .. }));
+}
+
+#[test]
 fn collects_include_dependencies_and_layout_blocks() {
     let template = parse(
         "page",
