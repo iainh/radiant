@@ -1,0 +1,17 @@
+[package]
+name = "radiant-axum"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Axum integration for the Radiant template engine"
+
+[dependencies]
+axum = "0.8"
+futures-util = "0.3"
+radiant = { path = ".." }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

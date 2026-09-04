@@ -1,0 +1,25 @@
+[package]
+name = "radiant"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A strict, async Qute-style template engine for Rust"
+
+[features]
+default = []
+serde = ["dep:serde", "dep:serde_json"]
+
+[workspace]
+members = [".", "radiant-axum", "radiant-compiler", "radiant-macros"]
+resolver = "2"
+
+[dependencies]
+bytes = "1"
+futures-util = "0.3"
+radiant-compiler = { path = "radiant-compiler" }
+radiant-macros = { path = "radiant-macros" }
+serde = { version = "1", optional = true }
+serde_json = { version = "1", optional = true }
+
+[dev-dependencies]
+futures-executor = "0.3"
