@@ -49,6 +49,28 @@ let rendered = Engine::new()?
 
 The derive reads and parses the root template and every static include during compilation. The complete dependency graph is embedded in the binary, and `include_bytes!` makes Cargo rebuild it when any template changes. Rust fields are exposed explicitly through `TemplateValue`; templates cannot reflect over arbitrary application objects.
 
+For templates made from text, expressions, conditionals, and loops, the derive emits direct Rust field access and control flow. Adjacent literal output is combined, values are escaped directly into the destination, and integers and floats use stack buffers. Templates that need includes, runtime resolvers, locale/media variants, or other dynamic features automatically use the full Qute evaluator instead.
+
+High-throughput callers can retain an output allocation across renders:
+
+```rust
+use radiant::Engine;
+
+# use radiant::{Template, TemplateValue};
+# #[derive(TemplateValue)] struct Product { name: String, price: i64 }
+# #[derive(Template)] #[template(path = "checked.html")]
+# struct ProductsPage<'a> { title: &'a str, items: &'a [Product] }
+# async fn example() -> Result<(), radiant::RenderError> {
+let engine = Engine::new()?;
+let mut output = String::new();
+engine.render_into(
+    ProductsPage { title: "Products", items: &[] },
+    &mut output,
+).await?;
+# Ok(())
+# }
+```
+
 ## Axum
 
 Store an `Engine` in router state and extract a request-scoped `Renderer`:
