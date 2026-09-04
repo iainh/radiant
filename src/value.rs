@@ -96,6 +96,16 @@ impl Value {
             Self::Map(_) => "[map]".into(),
         }
     }
+
+    pub(crate) fn as_string_key(&self) -> Option<&str> {
+        match self {
+            Self::String(value)
+            | Self::SafeHtml(value)
+            | Self::SafeXml(value)
+            | Self::SafeJsonString(value) => Some(value),
+            _ => None,
+        }
+    }
 }
 
 /// Converts application data into the explicit template value model.

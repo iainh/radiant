@@ -310,6 +310,28 @@ fn non_strict_missing_value_output_is_configurable() {
 }
 
 #[test]
+fn qute_collection_conveniences_are_available() {
+    let engine = Engine::builder()
+        .template(
+            "collections.txt",
+            "{map.get('a')}:{map.keySet.size}|{items.reversed[0]}:{items.take(2).size}:{items.takeLast(1)[0]}",
+        )
+        .build()
+        .unwrap();
+    let map = Value::Map(BTreeMap::from([("a".into(), Value::Integer(1))]));
+
+    let rendered = block_on(
+        block_on(engine.template("collections.txt"))
+            .unwrap()
+            .data("map", map)
+            .data("items", vec![1_i64, 2, 3])
+            .render(),
+    )
+    .unwrap();
+    assert_eq!(rendered.to_string(), "1:1|3:2:3");
+}
+
+#[test]
 fn layouts_and_fragments_compose_without_global_state() {
     let engine = Engine::builder()
         .template(

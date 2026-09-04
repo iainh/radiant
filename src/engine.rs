@@ -1569,12 +1569,17 @@ fn resolve_builtin(base: &Value, name: &str, arguments: &[Value]) -> Resolution<
         (Value::Map(values), "isEmpty" | "empty") if no_arguments => {
             Resolution::Value(Value::Bool(values.is_empty()))
         }
-        (Value::Map(values), "keys") if no_arguments => Resolution::Value(Value::Sequence(
-            values.keys().cloned().map(Value::String).collect(),
-        )),
+        (Value::Map(values), "keys" | "keySet") if no_arguments => Resolution::Value(
+            Value::Sequence(values.keys().cloned().map(Value::String).collect()),
+        ),
         (Value::Map(values), "values") if no_arguments => {
             Resolution::Value(Value::Sequence(values.values().cloned().collect()))
         }
+        (Value::Map(values), "get") if arguments.len() == 1 => arguments[0]
+            .as_string_key()
+            .and_then(|key| values.get(key))
+            .cloned()
+            .map_or(Resolution::NotFound, Resolution::Value),
         (Value::Map(values), key) if no_arguments => values
             .get(key)
             .cloned()
@@ -1603,6 +1608,22 @@ fn resolve_builtin(base: &Value, name: &str, arguments: &[Value]) -> Resolution<
             } else {
                 Resolution::NotFound
             }
+        }
+        (Value::Sequence(values), "reversed") if no_arguments => {
+            Resolution::Value(Value::Sequence(values.iter().rev().cloned().collect()))
+        }
+        (Value::Sequence(values), "take" | "takeLast") if arguments.len() == 1 => {
+            let Value::Integer(count) = arguments[0] else {
+                return Resolution::NotFound;
+            };
+            let count = usize::try_from(count).unwrap_or(0).min(values.len());
+            let start = if name == "takeLast" {
+                values.len() - count
+            } else {
+                0
+            };
+            let end = if name == "take" { count } else { values.len() };
+            Resolution::Value(Value::Sequence(values[start..end].to_vec()))
         }
         (Value::String(value), "size" | "length") if no_arguments => {
             Resolution::Value(Value::Integer(value.chars().count() as i64))
