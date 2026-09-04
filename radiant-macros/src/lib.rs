@@ -512,11 +512,31 @@ impl Loader {
         });
         stack.push(resolved_id);
         for dependency in template.dependencies() {
-            let template_id = dependency
+            let (template_id, fragment) = dependency
                 .split_once('$')
-                .map_or(dependency, |(template_id, _)| template_id);
+                .map_or((dependency, None), |(template_id, fragment)| {
+                    (template_id, Some(fragment))
+                });
             if !template_id.is_empty() {
                 self.load(template_id, stack);
+            }
+            if let Some(fragment) = fragment {
+                let exists = if template_id.is_empty() {
+                    fragment_exists(&template, fragment)
+                } else {
+                    normalize_id(template_id)
+                        .ok()
+                        .and_then(|id| self.resolve(&id))
+                        .and_then(|(id, _)| self.sources.iter().find(|source| source.id == id))
+                        .and_then(|source| radiant_compiler::parse(&source.id, &source.source).ok())
+                        .is_some_and(|target| fragment_exists(&target, fragment))
+                };
+                if !exists {
+                    self.errors.push(Error::new(
+                        Span::call_site(),
+                        format!("fragment `{fragment}` was not found in template `{template_id}`"),
+                    ));
+                }
             }
         }
         for dependency in template.tag_dependencies() {
@@ -541,6 +561,16 @@ impl Loader {
                 .then(|| (relative.to_string_lossy().replace('\\', "/"), path))
         })
     }
+}
+
+fn fragment_exists(template: &radiant_compiler::Template, name: &str) -> bool {
+    template.fragments().into_iter().any(|fragment| {
+        fragment
+            .arguments
+            .first()
+            .and_then(radiant_compiler::Argument::static_text)
+            == Some(name)
+    })
 }
 
 fn normalize_id(value: &str) -> std::result::Result<String, &'static str> {
@@ -658,5 +688,17 @@ mod tests {
     fn applies_rename_rules() {
         assert_eq!(RenameRule::Camel.apply("first_name"), "firstName");
         assert_eq!(RenameRule::Kebab.apply("first_name"), "first-name");
+    }
+    #[test]
+    fn finds_fragment_and_capture_targets() {
+        let template = radiant_compiler::parse(
+            "parts",
+            "{#fragment card}{/fragment}{#capture note}{/capture}",
+        )
+        .unwrap();
+
+        assert!(fragment_exists(&template, "card"));
+        assert!(fragment_exists(&template, "note"));
+        assert!(!fragment_exists(&template, "missing"));
     }
 }
