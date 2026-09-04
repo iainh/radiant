@@ -664,6 +664,8 @@ impl Engine {
                     ]))
                 })
                 .collect(),
+            Value::Integer(end) if end > 0 => (1..=end).map(Value::Integer).collect(),
+            Value::Integer(_) => Vec::new(),
             Value::Null => Vec::new(),
             other => {
                 return Err(RenderError::new(

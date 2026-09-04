@@ -129,6 +129,22 @@ fn dynamic_sections_preserve_scope_and_loop_metadata() {
 }
 
 #[test]
+fn loops_support_positive_integers() {
+    let engine = Engine::builder()
+        .template("integer-loop.txt", "{#for number in 3}{number}{/for}")
+        .build()
+        .unwrap();
+    let rendered = block_on(
+        block_on(engine.template("integer-loop.txt"))
+            .unwrap()
+            .instance()
+            .render(),
+    )
+    .unwrap();
+    assert_eq!(rendered.to_string(), "123");
+}
+
+#[test]
 fn parameter_defaults_and_conditional_let_preserve_values() {
     let engine = Engine::builder()
         .template(
