@@ -93,7 +93,13 @@ impl Parser<'_> {
                 continue;
             }
             if self.source[start..].starts_with("{|") {
-                let Some(end_rel) = self.source[start + 2..].find("|}") else {
+                let pipe_count = self.source[start + 1..]
+                    .bytes()
+                    .take_while(|byte| *byte == b'|')
+                    .count();
+                let content_start = start + 1 + pipe_count;
+                let delimiter = format!("{}{}", "|".repeat(pipe_count), "}");
+                let Some(end_rel) = self.source[content_start..].find(&delimiter) else {
                     self.error(
                         "E_UNCLOSED_UNPARSED",
                         "unterminated unparsed block",
@@ -102,9 +108,10 @@ impl Parser<'_> {
                     self.at = self.source.len();
                     break;
                 };
-                let end = start + 2 + end_rel + 2;
+                let content_end = content_start + end_rel;
+                let end = content_end + delimiter.len();
                 nodes.push(Node::Unparsed {
-                    value: self.source[start + 2..end - 2].into(),
+                    value: self.source[content_start..content_end].into(),
                     span: Span::new(start, end),
                 });
                 self.at = end;

@@ -53,6 +53,13 @@ fn preserves_comments_and_unparsed_content() {
 }
 
 #[test]
+fn multi_pipe_unparsed_blocks_allow_shorter_delimiters() {
+    let template = parse("raw", "{||||a|}b|||}c||||}").unwrap();
+
+    assert!(matches!(&template.nodes[0], Node::Unparsed { value, .. } if value == "a|}b|||}c"));
+}
+
+#[test]
 fn escaped_braces_are_literal_text() {
     let template = parse("braces", r"before \{name\} after {name}").unwrap();
 
