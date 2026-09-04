@@ -109,3 +109,30 @@ fn safe_suffix_and_elvis_are_distinct() {
     };
     assert!(matches!(**left, Expr::Safe { .. }));
 }
+
+#[test]
+fn parses_else_if_as_a_conditional_block() {
+    let template = parse(
+        "condition",
+        "{#if first}first{#else if second && third}second{#else}last{/if}",
+    )
+    .unwrap();
+    let Node::Section(section) = &template.nodes[0] else {
+        panic!("expected if section")
+    };
+
+    assert_eq!(section.blocks.len(), 3);
+    assert_eq!(section.blocks[1].name, "else");
+    assert!(matches!(
+        section.blocks[1].arguments.as_slice(),
+        [radiant_compiler::Argument {
+            name: Some(name),
+            value: ArgumentValue::Expression(Expr::Binary {
+                op: BinaryOp::And,
+                ..
+            }),
+            ..
+        }] if name == "if"
+    ));
+    assert!(section.blocks[2].arguments.is_empty());
+}

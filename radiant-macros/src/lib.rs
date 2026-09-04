@@ -287,13 +287,25 @@ impl DirectCompiler {
                         _ => return None,
                     };
                     let body = self.nodes(&section.blocks.first()?.nodes)?;
-                    let alternative = if let Some(block) =
-                        section.blocks.iter().find(|block| block.name == "else")
-                    {
-                        self.nodes(&block.nodes)?
-                    } else {
-                        proc_macro2::TokenStream::new()
-                    };
+                    let mut alternative = proc_macro2::TokenStream::new();
+                    for block in section.blocks.iter().skip(1).rev() {
+                        let body = self.nodes(&block.nodes)?;
+                        if let Some(condition) = block
+                            .arguments
+                            .iter()
+                            .find(|argument| argument.name.as_deref() == Some("if"))
+                        {
+                            let ArgumentValue::Expression(condition) = &condition.value else {
+                                return None;
+                            };
+                            let condition = self.expression(condition)?;
+                            alternative = quote! {
+                                if (#condition).is_truthy() { #body } else { #alternative }
+                            };
+                        } else {
+                            alternative = body;
+                        }
+                    }
                     statements.push(quote! {
                         if (#condition).is_truthy() { #body } else { #alternative }
                     });

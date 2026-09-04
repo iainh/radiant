@@ -478,11 +478,27 @@ impl Engine {
                     let condition = self
                         .argument(section.arguments.first(), template, state)
                         .await?;
-                    let block = if condition.is_truthy() {
-                        section.blocks.first()
-                    } else {
-                        section.blocks.iter().find(|block| block.name == "else")
-                    };
+                    let mut block = condition.is_truthy().then(|| &section.blocks[0]);
+                    if block.is_none() {
+                        for alternative in section.blocks.iter().skip(1) {
+                            let Some(condition) = alternative
+                                .arguments
+                                .iter()
+                                .find(|argument| argument.name.as_deref() == Some("if"))
+                            else {
+                                block = Some(alternative);
+                                break;
+                            };
+                            if self
+                                .argument(Some(condition), template, state)
+                                .await?
+                                .is_truthy()
+                            {
+                                block = Some(alternative);
+                                break;
+                            }
+                        }
+                    }
                     if let Some(block) = block {
                         self.render_nodes(&block.nodes, template, state, output)
                             .await?;

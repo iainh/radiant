@@ -26,6 +26,13 @@ struct CheckedFragment<'a> {
     title: &'a str,
 }
 
+#[derive(Template)]
+#[template(path = "checked-condition.html")]
+struct CheckedCondition {
+    first: bool,
+    second: bool,
+}
+
 #[test]
 fn checked_template_renders_typed_data_and_escapes_html() {
     let items = vec![Item {
@@ -100,6 +107,36 @@ fn dynamic_sections_preserve_scope_and_loop_metadata() {
     let rendered = block_on(template.data("items", items).data("label", "root").render()).unwrap();
 
     assert_eq!(rendered.to_string(), "1:A;|root");
+}
+
+#[test]
+fn else_if_blocks_select_the_first_truthy_condition() {
+    let engine = Engine::builder()
+        .template(
+            "condition.txt",
+            "{#if first}first{#else if second}second{#else if third}third{#else}last{/if}",
+        )
+        .build()
+        .unwrap();
+    let template = block_on(engine.template("condition.txt")).unwrap();
+
+    let rendered = block_on(
+        template
+            .data("first", false)
+            .data("second", false)
+            .data("third", true)
+            .render(),
+    )
+    .unwrap();
+
+    assert_eq!(rendered.to_string(), "third");
+
+    let rendered = block_on(Engine::new().unwrap().render(CheckedCondition {
+        first: false,
+        second: true,
+    }))
+    .unwrap();
+    assert_eq!(rendered.to_string(), "second\n");
 }
 
 #[test]

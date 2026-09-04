@@ -270,6 +270,14 @@ impl Parser<'_> {
         if text.is_empty() {
             return Vec::new();
         }
+        if section == "else"
+            && let Some(rest) = text.strip_prefix("if")
+            && rest.chars().next().is_some_and(char::is_whitespace)
+        {
+            let condition = rest.trim_start();
+            let condition_base = base + text.len() - condition.len();
+            return vec![self.expression_argument(Some("if".into()), condition, condition_base)];
+        }
         if section == "if" || section == "when" {
             return vec![self.expression_argument(None, text, base)];
         }
