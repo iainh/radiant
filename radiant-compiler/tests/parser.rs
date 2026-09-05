@@ -22,6 +22,23 @@ fn analysis_retains_valid_regions_for_invalid_source() {
 }
 
 #[test]
+fn unclosed_section_span_covers_its_recovered_body() {
+    let source = "{#if shown}body{#";
+    let analysis = analyze("incomplete", source);
+    let Node::Section(section) = &analysis.template.nodes[0] else {
+        panic!("expected recovered section")
+    };
+
+    assert_eq!(section.span.end, source.len());
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E_UNCLOSED_TAG")
+    );
+}
+
+#[test]
 fn parses_nested_sections_and_expression_precedence() {
     let template = parse(
         "nested.html",

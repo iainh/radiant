@@ -1,4 +1,4 @@
-use crate::{Expr, Span};
+use crate::{BUILT_IN_SECTIONS, Expr, Span};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Template {
@@ -37,21 +37,7 @@ impl Template {
         fn visit(nodes: &[Node], out: &mut Vec<String>) {
             for node in nodes {
                 if let Node::Section(section) = node {
-                    if !matches!(
-                        section.name.as_str(),
-                        "if" | "for"
-                            | "each"
-                            | "let"
-                            | "set"
-                            | "with"
-                            | "when"
-                            | "switch"
-                            | "include"
-                            | "insert"
-                            | "nested-content"
-                            | "fragment"
-                            | "capture"
-                    ) {
+                    if !BUILT_IN_SECTIONS.contains(&section.name.as_str()) {
                         let id = format!("tags/{}", section.name);
                         if !out.contains(&id) {
                             out.push(id);

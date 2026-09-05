@@ -1,5 +1,7 @@
+mod completion;
 mod documents;
 mod line_index;
+mod symbols;
 
 use std::sync::Mutex;
 
@@ -11,10 +13,11 @@ use tower_lsp::{
     Client, LanguageServer, LspService, Server,
     jsonrpc::Result,
     lsp_types::{
-        Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-        DidOpenTextDocumentParams, InitializeParams, InitializeResult, InitializedParams,
-        MessageType, NumberOrString, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
-        TextDocumentSyncKind, Url,
+        CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
+        DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+        DocumentSymbolParams, DocumentSymbolResponse, InitializeParams, InitializeResult,
+        InitializedParams, MessageType, NumberOrString, OneOf, ServerCapabilities, ServerInfo,
+        TextDocumentSyncCapability, TextDocumentSyncKind, Url,
     },
 };
 
@@ -48,6 +51,11 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec!["{".into(), "#".into()]),
+                    ..CompletionOptions::default()
+                }),
                 ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
@@ -65,6 +73,28 @@ impl LanguageServer for Backend {
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let documents = self.documents.lock().expect("document store poisoned");
+        Ok(documents
+            .get(&params.text_document.uri)
+            .map(|snapshot| DocumentSymbolResponse::Nested(symbols::document_symbols(snapshot))))
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let documents = self.documents.lock().expect("document store poisoned");
+        Ok(documents
+            .get(&params.text_document_position.text_document.uri)
+            .map(|snapshot| {
+                CompletionResponse::Array(completion::completions(
+                    snapshot,
+                    params.text_document_position.position,
+                ))
+            }))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {

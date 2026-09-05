@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::{
     Analysis, Argument, ArgumentValue, Block, Diagnostic, Expr, Literal, Node, Parameter, Section,
-    Span, Template,
+    Span, Template, built_in_block_names,
     expr::{make_diag, parse_expression},
 };
 
@@ -245,7 +245,7 @@ impl Parser<'_> {
             nodes: body,
             span: tag.span,
         }];
-        let mut end = tag.span.end;
+        let mut end = self.at;
         while let Some(Stop::Block(block_tag)) = stop {
             let block_name = block_tag.name.clone();
             let block_args = self.arguments(&block_name, &block_tag.rest, block_tag.inner_start);
@@ -406,12 +406,8 @@ fn next_span(stop: &Option<Stop>) -> Option<Span> {
     }
 }
 fn is_block(parent: &str, name: &str) -> bool {
-    match parent {
-        "if" | "for" => name == "else",
-        "when" => matches!(name, "else" | "is" | "case"),
-        "include" => !matches!(name, "if" | "for" | "when" | "include" | "fragment"),
-        _ => false,
-    }
+    built_in_block_names(parent).contains(&name)
+        || (parent == "include" && !matches!(name, "if" | "for" | "when" | "include" | "fragment"))
 }
 fn tag_end(source: &str, mut at: usize) -> Option<usize> {
     let mut quote = None;

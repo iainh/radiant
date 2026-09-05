@@ -58,6 +58,14 @@ async fn stdio_server_publishes_updates_rejects_stale_versions_and_clears_on_clo
     let initialized = receive(&mut stdout).await;
     assert_eq!(initialized["id"], 1);
     assert_eq!(initialized["result"]["capabilities"]["textDocumentSync"], 1);
+    assert_eq!(
+        initialized["result"]["capabilities"]["documentSymbolProvider"],
+        true
+    );
+    assert_eq!(
+        initialized["result"]["capabilities"]["completionProvider"]["triggerCharacters"],
+        json!(["{", "#"])
+    );
 
     send(
         &mut stdin,
@@ -79,12 +87,40 @@ async fn stdio_server_publishes_updates_rejects_stale_versions_and_clears_on_clo
 
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":"valid {name}"}]}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":"😀{@String name}\n{#if name}{name}{#else}none{/if}"}]}}),
     )
     .await;
     let changed = receive(&mut stdout).await;
     assert_eq!(changed["params"]["version"], 2);
     assert_eq!(changed["params"]["diagnostics"], json!([]));
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":3,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":uri}}}),
+    )
+    .await;
+    let symbols = receive(&mut stdout).await;
+    assert_eq!(symbols["id"], 3);
+    assert!(symbols["result"].is_array());
+    assert_eq!(symbols["result"][0]["name"], "name");
+    assert_eq!(
+        symbols["result"][0]["selectionRange"]["start"]["character"],
+        11
+    );
+    assert_eq!(symbols["result"][1]["name"], "if");
+    assert_eq!(symbols["result"][1]["children"][1]["name"], "else");
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":4,"method":"textDocument/completion","params":{"textDocument":{"uri":uri},"position":{"line":1,"character":9}}}),
+    )
+    .await;
+    let completion = receive(&mut stdout).await;
+    assert_eq!(completion["id"], 4);
+    assert!(completion["result"].is_array());
+    assert_eq!(completion["result"][0]["label"], "name");
+    assert_eq!(completion["result"][0]["kind"], 6);
+    assert_eq!(completion["result"][0]["detail"], "parameter: String");
 
     send(
         &mut stdin,

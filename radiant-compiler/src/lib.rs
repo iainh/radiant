@@ -11,6 +11,35 @@ pub use diagnostic::Diagnostic;
 pub use expr::{BinaryOp, Expr, Literal, UnaryOp};
 pub use span::Span;
 
+/// Section names implemented directly by Radiant.
+pub const BUILT_IN_SECTIONS: &[&str] = &[
+    "if",
+    "for",
+    "each",
+    "let",
+    "set",
+    "with",
+    "when",
+    "switch",
+    "include",
+    "insert",
+    "nested-content",
+    "fragment",
+    "capture",
+];
+
+/// Returns the fixed block names accepted by a built-in section.
+///
+/// Include block names are template-defined and therefore are not returned.
+#[must_use]
+pub const fn built_in_block_names(section: &str) -> &'static [&'static str] {
+    match section.as_bytes() {
+        b"if" | b"for" => &["else"],
+        b"when" => &["is", "case", "else"],
+        _ => &[],
+    }
+}
+
 /// The best-effort syntax tree and all diagnostics produced while analyzing a template.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Analysis {
