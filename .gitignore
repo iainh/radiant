@@ -1,2 +1,5 @@
 /target
+tree-sitter-radiant/node_modules/
+tree-sitter-radiant/src/grammar.json
+tree-sitter-radiant/src/node-types.json
 .amp/portals/*

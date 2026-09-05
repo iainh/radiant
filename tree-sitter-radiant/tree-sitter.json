@@ -1,0 +1,35 @@
+{
+  "grammars": [
+    {
+      "name": "radiant",
+      "camelcase": "Radiant",
+      "scope": "text.html.radiant",
+      "path": ".",
+      "file-types": ["radiant"],
+      "highlights": "queries/highlights.scm",
+      "injections": "queries/injections.scm",
+      "injection-regex": "^radiant$"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT OR Apache-2.0",
+    "description": "Radiant templates with HTML",
+    "authors": [
+      {
+        "name": "Radiant contributors"
+      }
+    ],
+    "links": {
+      "repository": "https://github.com/iainh/radiant"
+    }
+  },
+  "bindings": {
+    "c": false,
+    "go": false,
+    "node": false,
+    "python": false,
+    "rust": false,
+    "swift": false
+  }
+}

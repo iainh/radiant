@@ -2,6 +2,30 @@ local server = vim.env.RADIANT_LSP
 assert(server and server ~= "", "RADIANT_LSP must point to the radiant-lsp binary")
 assert(vim.fn.executable(server) == 1, "RADIANT_LSP is not executable: " .. server)
 
+local tree_sitter_parser = vim.env.RADIANT_TS_PARSER
+assert(tree_sitter_parser and tree_sitter_parser ~= "",
+  "RADIANT_TS_PARSER must point to the compiled Radiant parser")
+assert(vim.fn.filereadable(tree_sitter_parser) == 1,
+  "Radiant Tree-sitter parser is not readable: " .. tree_sitter_parser)
+
+local grammar_root = vim.env.RADIANT_TS_ROOT or (vim.fn.getcwd() .. "/tree-sitter-radiant")
+local highlight_path = grammar_root .. "/queries/highlights.scm"
+local injection_path = grammar_root .. "/queries/injections.scm"
+assert(vim.fn.filereadable(highlight_path) == 1,
+  "Radiant Tree-sitter highlight query is not readable: " .. highlight_path)
+assert(vim.fn.filereadable(injection_path) == 1,
+  "Radiant Tree-sitter injection query is not readable: " .. injection_path)
+
+vim.treesitter.language.add("radiant", { path = tree_sitter_parser })
+local language = vim.treesitter.language.inspect("radiant")
+assert(language and language.abi_version == 15,
+  "Neovim did not load the ABI 15 Radiant Tree-sitter parser")
+local highlight_source = table.concat(vim.fn.readfile(highlight_path), "\n")
+local highlight_query = vim.treesitter.query.parse("radiant", highlight_source)
+vim.treesitter.query.set("radiant", "highlights", highlight_source)
+local injection_source = table.concat(vim.fn.readfile(injection_path), "\n")
+vim.treesitter.query.set("radiant", "injections", injection_source)
+
 local root = vim.fn.tempname()
 local templates = root .. "/templates"
 vim.fn.mkdir(templates .. "/layouts", "p")
@@ -23,11 +47,41 @@ local initial = {
   "{#include fragments$absent /}",
   "{#include cycle /}",
   "{#include _id=chosen /}",
+  "<main class=\"card\"><!-- html -->{! note !}{| raw {value} |}<b>{name ?: 'guest'}</b></main>",
 }
 vim.fn.writefile(initial, page)
 vim.cmd.edit(vim.fn.fnameescape(page))
 local buffer = vim.api.nvim_get_current_buf()
 vim.bo[buffer].filetype = "radiant"
+
+local parser = vim.treesitter.get_parser(buffer, "radiant", { error = false })
+assert(parser, "Neovim did not create a Radiant Tree-sitter parser")
+local tree = assert(parser:parse()[1], "Neovim did not parse the Radiant template")
+local captures = {}
+for id, node in highlight_query:iter_captures(tree:root(), buffer, 0, -1) do
+  local capture = highlight_query.captures[id]
+  local text = vim.treesitter.get_node_text(node, buffer)
+  captures[capture] = captures[capture] or {}
+  captures[capture][text] = true
+end
+
+local function assert_capture(capture, text)
+  assert(captures[capture] and captures[capture][text],
+    string.format("missing Tree-sitter capture @%s for %q", capture, text))
+end
+
+assert_capture("tag", "main")
+assert_capture("tag.attribute", "class")
+assert_capture("type", "String")
+assert_capture("variable.parameter", "name")
+assert_capture("keyword", "if")
+assert_capture("variable", "name")
+assert_capture("operator", "?:")
+assert_capture("string", "'guest'")
+assert_capture("comment", "<!-- html -->")
+assert_capture("comment", "{! note !}")
+assert_capture("string.special", " raw {value} ")
+vim.treesitter.start(buffer, "radiant")
 
 local client_id = vim.lsp.start({
   name = "radiant-editor-smoke",
@@ -180,4 +234,4 @@ assert(vim.wait(5000, function()
   return client:is_stopped()
 end, 20), "radiant-lsp did not stop cleanly")
 vim.fn.delete(root, "rf")
-print("radiant-lsp Neovim 0.11.4 acceptance: diagnostics/watchers, symbols, hover, definitions, typed completion order, negotiated snippets, fragments/captures and layout blocks passed")
+print("radiant Neovim 0.11.4 acceptance: compiled Tree-sitter parser and HTML/Radiant captures; LSP diagnostics/watchers, symbols, hover, definitions, typed completion order, negotiated snippets, fragments/captures and layout blocks passed")

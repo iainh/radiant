@@ -1,0 +1,15 @@
+{
+  "name": "tree-sitter-radiant",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for Radiant templates",
+  "license": "MIT OR Apache-2.0",
+  "private": true,
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "0.25.10",
+    "tree-sitter-html": "0.23.2"
+  }
+}

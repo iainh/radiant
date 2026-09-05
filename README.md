@@ -166,11 +166,32 @@ cargo install --path radiant-lsp
 
 `radiant-lsp` provides live parser diagnostics, document symbols, snippet completion for built-in sections, scoped variables, template IDs, user tags, referenced fragments and layout blocks, hover documentation, and go-to-definition for local declarations, includes and user tags. Completion candidates are filtered and ranked server-side. It discovers templates below each workspace's `templates/` directory and refreshes them when the editor reports file changes.
 
-For Neovim 0.11 or newer, mark files below `templates/` as Radiant templates and enable the built-in LSP client:
+### Neovim
+
+The repository includes a Tree-sitter grammar in `tree-sitter-radiant/`. It extends the standard HTML grammar, so HTML tags and attributes remain highlighted alongside Radiant declarations, sections and expressions. To install its vendored C parser and queries for Neovim 0.11 or newer without an editor plugin, run from the repository root:
+
+```console
+parser_dir="${XDG_DATA_HOME:-$HOME/.local/share}/nvim/site/parser"
+query_dir="${XDG_DATA_HOME:-$HOME/.local/share}/nvim/site/queries/radiant"
+mkdir -p "$parser_dir" "$query_dir"
+cc -O2 -fPIC -shared -I tree-sitter-radiant/src \
+  tree-sitter-radiant/src/parser.c tree-sitter-radiant/src/scanner.c \
+  -o "$parser_dir/radiant.so"
+cp tree-sitter-radiant/queries/*.scm "$query_dir/"
+```
+
+Then mark files below `templates/` as Radiant templates, start Tree-sitter highlighting and enable the built-in LSP client:
 
 ```lua
 vim.filetype.add({
-  pattern = { [".*/templates/.*%.html"] = "radiant" },
+  pattern = { [".*/templates/.*"] = "radiant" },
+})
+
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = "radiant",
+  callback = function(args)
+    vim.treesitter.start(args.buf, "radiant")
+  end,
 })
 
 vim.lsp.config.radiant = {
@@ -196,11 +217,16 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-The optional editor acceptance test requires Neovim 0.11 or newer and a built server binary:
+The optional editor acceptance test requires Neovim 0.11.4, a built server binary and a compiled parser:
 
 ```console
 cargo build -p radiant-lsp
+mkdir -p target/tree-sitter
+cc -O2 -fPIC -shared -I tree-sitter-radiant/src \
+  tree-sitter-radiant/src/parser.c tree-sitter-radiant/src/scanner.c \
+  -o target/tree-sitter/radiant.so
 RADIANT_LSP="$PWD/target/debug/radiant-lsp" \
+RADIANT_TS_PARSER="$PWD/target/tree-sitter/radiant.so" \
   nvim --clean --headless -l radiant-lsp/tests/neovim_smoke.lua
 ```
 

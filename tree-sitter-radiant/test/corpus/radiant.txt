@@ -1,0 +1,308 @@
+==================
+HTML coexistence
+==================
+
+<!doctype html>
+<main class="card {theme}" data-user={user.name}>
+  <h1>{title}</h1>
+  <!-- ordinary HTML comment -->
+</main>
+
+---
+
+(document
+  (doctype)
+  (element
+    (start_tag
+      (tag_name)
+      (attribute
+        (attribute_name)
+        (quoted_attribute_value
+          (attribute_value)
+          (output_expression
+            (delimiter)
+            (expression
+              (identifier))
+            (delimiter))))
+      (attribute
+        (attribute_name)
+        (output_expression
+          (delimiter)
+          (expression
+            (member_expression
+              (expression
+                (identifier))
+              (identifier)))
+          (delimiter))))
+    (element
+      (start_tag
+        (tag_name))
+      (output_expression
+        (delimiter)
+        (expression
+          (identifier))
+        (delimiter))
+      (end_tag
+        (tag_name)))
+    (comment)
+    (end_tag
+      (tag_name))))
+
+==================
+Nested sections and blocks
+==================
+
+{#if account.active}
+  <ul>
+  {#for item in account.items}
+    {#when item.kind}
+      {#is 'featured'}<li>{item.name}</li>
+      {#else}<li>{item.name ?: 'Untitled'}</li>
+    {/when}
+  {/for}
+  </ul>
+{/if}
+
+---
+
+(document
+  (section_open
+    (delimiter)
+    (section_name)
+    (section_argument
+      (expression
+        (member_expression
+          (expression
+            (identifier))
+          (identifier))))
+    (delimiter))
+  (element
+    (start_tag
+      (tag_name))
+    (section_open
+      (delimiter)
+      (section_name)
+      (section_argument
+        (expression
+          (identifier)))
+      (section_argument
+        (expression
+          (identifier)))
+      (section_argument
+        (expression
+          (member_expression
+            (expression
+              (identifier))
+            (identifier))))
+      (delimiter))
+    (section_open
+      (delimiter)
+      (section_name)
+      (section_argument
+        (expression
+          (member_expression
+            (expression
+              (identifier))
+            (identifier))))
+      (delimiter))
+    (section_open
+      (delimiter)
+      (section_name)
+      (section_argument
+        (expression
+          (string)))
+      (delimiter))
+    (element
+      (start_tag
+        (tag_name))
+      (output_expression
+        (delimiter)
+        (expression
+          (member_expression
+            (expression
+              (identifier))
+            (identifier)))
+        (delimiter))
+      (end_tag
+        (tag_name)))
+    (section_open
+      (delimiter)
+      (section_name)
+      (delimiter))
+    (element
+      (start_tag
+        (tag_name))
+      (output_expression
+        (delimiter)
+        (expression
+          (binary_expression
+            (expression
+              (member_expression
+                (expression
+                  (identifier))
+                (identifier)))
+            (expression
+              (string))))
+        (delimiter))
+      (end_tag
+        (tag_name)))
+    (section_close
+      (delimiter)
+      (section_name)
+      (delimiter))
+    (section_close
+      (delimiter)
+      (section_name)
+      (delimiter))
+    (end_tag
+      (tag_name)))
+  (section_close
+    (delimiter)
+    (section_name)
+    (delimiter)))
+
+==================
+Declarations and expressions
+==================
+
+{@String café = 'Montréal'}
+{@i64 count=2}
+{msg:greeting(café, users[0].name) ?: 'Bonjour'}
+{! opérateurs et Unicode 😀 !}
+
+---
+
+(document
+  (parameter_declaration
+    (delimiter)
+    (type_identifier)
+    (identifier)
+    (expression
+      (string))
+    (delimiter))
+  (parameter_declaration
+    (delimiter)
+    (type_identifier)
+    (identifier)
+    (expression
+      (integer))
+    (delimiter))
+  (output_expression
+    (delimiter)
+    (expression
+      (binary_expression
+        (expression
+          (call_expression
+            (expression
+              (namespace_expression
+                (identifier)
+                (identifier)))
+            (expression
+              (identifier))
+            (expression
+              (member_expression
+                (expression
+                  (index_expression
+                    (expression
+                      (identifier))
+                    (expression
+                      (integer))))
+                (identifier)))))
+        (expression
+          (string))))
+    (delimiter))
+  (radiant_comment
+    (delimiter)
+    (comment_content)
+    (delimiter)))
+
+==================
+Comments and unparsed content
+==================
+
+Before {! {ignored.value} <b>not HTML</b> !} after.
+{| <strong>{also_ignored}</strong> |}
+{||| arbitrary || braces } and {| pairs |||}
+Literal \{name} and JSON { "ready": true } stay text.
+
+---
+
+(document
+  (text)
+  (radiant_comment
+    (delimiter)
+    (comment_content)
+    (delimiter))
+  (text)
+  (unparsed_block
+    (delimiter)
+    (unparsed_content)
+    (delimiter))
+  (unparsed_block
+    (delimiter)
+    (unparsed_content)
+    (delimiter))
+  (text)
+  (escaped_brace)
+  (text)
+  (text)
+  (text))
+
+==================
+Incomplete section while editing
+==================
+
+<section>{#if user.active
+
+---
+
+(document
+  (ERROR
+    (start_tag
+      (tag_name))
+    (delimiter)
+    (section_name)
+    (expression
+      (member_expression
+        (expression
+          (identifier))
+        (identifier)))))
+
+==================
+Malformed output while editing
+==================
+
+<p>{user.name</p>
+
+---
+
+(document
+  (ERROR
+    (start_tag
+      (tag_name))
+    (delimiter)
+    (expression
+      (binary_expression
+        (expression
+          (member_expression
+            (expression
+              (identifier))
+            (identifier)))
+        (ERROR)
+        (expression
+          (identifier))))))
+
+==================
+Incomplete comment while editing
+==================
+
+Before {! unfinished comment
+
+---
+
+(document
+  (text)
+  (radiant_comment
+    (delimiter)
+    (comment_content)
+    (MISSING delimiter)))
