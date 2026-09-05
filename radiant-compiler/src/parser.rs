@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 
 use crate::{
-    Argument, ArgumentValue, Block, Diagnostic, Expr, Literal, Node, Parameter, Section, Span,
-    Template,
+    Analysis, Argument, ArgumentValue, Block, Diagnostic, Expr, Literal, Node, Parameter, Section,
+    Span, Template,
     expr::{make_diag, parse_expression},
 };
 
-pub(crate) fn parse_template(name: &str, source: &str) -> Result<Template, Vec<Diagnostic>> {
+pub(crate) fn analyze_template(name: &str, source: &str) -> Analysis {
     let mut parser = Parser {
         name,
         source,
@@ -27,10 +27,9 @@ pub(crate) fn parse_template(name: &str, source: &str) -> Result<Template, Vec<D
         nodes,
     };
     validate_into(&template, &mut parser.diagnostics);
-    if parser.diagnostics.is_empty() {
-        Ok(template)
-    } else {
-        Err(parser.diagnostics)
+    Analysis {
+        template,
+        diagnostics: parser.diagnostics,
     }
 }
 

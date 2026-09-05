@@ -10,7 +10,7 @@ default = []
 serde = ["dep:serde", "dep:serde_json"]
 
 [workspace]
-members = [".", "radiant-axum", "radiant-compiler", "radiant-macros"]
+members = [".", "radiant-axum", "radiant-compiler", "radiant-lsp", "radiant-macros"]
 resolver = "2"
 
 [dependencies]

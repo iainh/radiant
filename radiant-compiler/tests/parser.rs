@@ -1,4 +1,25 @@
-use radiant_compiler::{ArgumentValue, BinaryOp, Expr, Node, parse};
+use radiant_compiler::{ArgumentValue, BinaryOp, Expr, Node, analyze, parse};
+
+#[test]
+fn analysis_returns_the_ast_for_valid_source() {
+    let analysis = analyze("valid", "hello {name}");
+
+    assert!(analysis.diagnostics.is_empty());
+    assert_eq!(analysis.template.nodes.len(), 2);
+    assert!(matches!(analysis.template.nodes[1], Node::Output { .. }));
+    assert_eq!(parse("valid", "hello {name}").unwrap(), analysis.template);
+}
+
+#[test]
+fn analysis_retains_valid_regions_for_invalid_source() {
+    let analysis = analyze("invalid", "hello {name} {broken +}");
+
+    assert_eq!(analysis.diagnostics.len(), 1);
+    assert_eq!(analysis.diagnostics[0].code, "E_EXPR_EXPECTED");
+    assert_eq!(analysis.template.nodes.len(), 3);
+    assert!(matches!(analysis.template.nodes[1], Node::Output { .. }));
+    assert!(parse("invalid", "hello {name} {broken +}").is_err());
+}
 
 #[test]
 fn parses_nested_sections_and_expression_precedence() {
