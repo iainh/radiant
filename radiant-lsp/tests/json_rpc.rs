@@ -191,6 +191,34 @@ async fn stdio_server_publishes_updates_rejects_stale_versions_and_clears_on_clo
 
     send(
         &mut stdin,
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":uri,"version":3},"contentChanges":[{"text":"{#i"}]}}),
+    )
+    .await;
+    assert_eq!(receive(&mut stdout).await["params"]["version"], 3);
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":9,"method":"textDocument/completion","params":{"textDocument":{"uri":uri},"position":{"line":0,"character":3}}}),
+    )
+    .await;
+    let plain_completion = receive(&mut stdout).await;
+    assert_eq!(plain_completion["id"], 9);
+    assert_eq!(
+        plain_completion["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["label"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["if", "insert", "include"]
+    );
+    assert_eq!(
+        plain_completion["result"][0]["insertText"],
+        "if condition}{/if}"
+    );
+    assert!(plain_completion["result"][0]["insertTextFormat"].is_null());
+
+    send(
+        &mut stdin,
         json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":"{stale +}"}]}}),
     )
     .await;
@@ -228,8 +256,17 @@ async fn workspace_templates_register_watchers_refresh_and_return_protocol_shape
     fs::create_dir_all(second.path().join("templates")).unwrap();
     let layout = first.path().join("templates/layouts/base.html");
     let tag = first.path().join("templates/tags/card.html");
-    fs::write(&layout, "layout").unwrap();
+    fs::write(
+        &layout,
+        "{#insert header}{/insert}{#insert body /}{#insert footer}{/insert}",
+    )
+    .unwrap();
     fs::write(&tag, "tag").unwrap();
+    fs::write(
+        first.path().join("templates/fragments.html"),
+        "{#fragment primary /}{#capture private /}{#fragment secondary /}",
+    )
+    .unwrap();
     fs::write(second.path().join("templates/isolated.html"), "other").unwrap();
     let first_uri = tower_lsp::lsp_types::Url::from_file_path(first.path()).unwrap();
     let second_uri = tower_lsp::lsp_types::Url::from_file_path(second.path()).unwrap();
@@ -258,7 +295,10 @@ async fn workspace_templates_register_watchers_refresh_and_return_protocol_shape
                     {"uri":first_uri,"name":"first"},
                     {"uri":second_uri,"name":"second"}
                 ],
-                "capabilities":{"workspace":{"didChangeWatchedFiles":{"dynamicRegistration":true}}}
+                "capabilities":{
+                    "workspace":{"didChangeWatchedFiles":{"dynamicRegistration":true}},
+                    "textDocument":{"completion":{"completionItem":{"snippetSupport":true}}}
+                }
             }
         }),
     )
@@ -309,9 +349,54 @@ async fn workspace_templates_register_watchers_refresh_and_return_protocol_shape
         .iter()
         .map(|item| item["label"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(labels, ["layouts/base", "tags/card"]);
+    assert_eq!(labels, ["layouts/base"]);
     assert_eq!(initial["result"][0]["kind"], 17);
     assert!(!labels.contains(&"isolated"));
+
+    for (id, source, expected) in [
+        (8, "{#i", vec!["if", "insert", "include"]),
+        (9, "{#include fragments$pr", vec!["primary", "private"]),
+        (10, "{#include layouts/base}{#he", vec!["header"]),
+    ] {
+        send(
+            &mut stdin,
+            json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":document_uri,"version":id},"contentChanges":[{"text":source}]}}),
+        )
+        .await;
+        assert_eq!(receive(&mut stdout).await["params"]["version"], id);
+        send(
+            &mut stdin,
+            json!({"jsonrpc":"2.0","id":id,"method":"textDocument/completion","params":{"textDocument":{"uri":document_uri},"position":{"line":0,"character":source.len()}}}),
+        )
+        .await;
+        let completion = receive(&mut stdout).await;
+        assert_eq!(completion["id"], id);
+        assert_eq!(
+            completion["result"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["label"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        if id == 8 {
+            assert_eq!(
+                completion["result"][0]["insertText"],
+                "if ${1:condition}}${0}{/if}"
+            );
+            assert_eq!(completion["result"][0]["insertTextFormat"], 2);
+            assert_eq!(completion["result"][0]["kind"], 15);
+        }
+    }
+
+    let all_templates = "{#include ";
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":document_uri,"version":11},"contentChanges":[{"text":all_templates}]}}),
+    )
+    .await;
+    assert_eq!(receive(&mut stdout).await["params"]["version"], 11);
 
     let created = first.path().join("templates/new.txt");
     fs::write(&created, "new").unwrap();
@@ -323,11 +408,11 @@ async fn workspace_templates_register_watchers_refresh_and_return_protocol_shape
     .await;
     assert_eq!(
         receive_diagnostics(&mut stdout, document_uri.as_str()).await["params"]["version"],
-        1
+        11
     );
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","id":3,"method":"textDocument/completion","params":{"textDocument":{"uri":document_uri},"position":{"line":0,"character":incomplete.len()}}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"textDocument/completion","params":{"textDocument":{"uri":document_uri},"position":{"line":0,"character":all_templates.len()}}}),
     )
     .await;
     let refreshed = receive(&mut stdout).await;
@@ -346,16 +431,16 @@ async fn workspace_templates_register_watchers_refresh_and_return_protocol_shape
     .await;
     assert_eq!(
         receive_diagnostics(&mut stdout, document_uri.as_str()).await["params"]["version"],
-        1
+        11
     );
 
     let references = "{#include layouts/base /}{#card /}";
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":document_uri,"version":2},"contentChanges":[{"text":references}]}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":document_uri,"version":12},"contentChanges":[{"text":references}]}}),
     )
     .await;
-    assert_eq!(receive(&mut stdout).await["params"]["version"], 2);
+    assert_eq!(receive(&mut stdout).await["params"]["version"], 12);
     for (id, character, target) in [
         (4, references.find("layouts/base").unwrap(), &layout),
         (5, references.find("card").unwrap(), &tag),
@@ -379,7 +464,13 @@ async fn workspace_templates_register_watchers_refresh_and_return_protocol_shape
 
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","id":6,"method":"textDocument/completion","params":{"textDocument":{"uri":document_uri},"position":{"line":0,"character":incomplete.len()}}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":document_uri,"version":13},"contentChanges":[{"text":all_templates}]}}),
+    )
+    .await;
+    assert_eq!(receive(&mut stdout).await["params"]["version"], 13);
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":6,"method":"textDocument/completion","params":{"textDocument":{"uri":document_uri},"position":{"line":0,"character":all_templates.len()}}}),
     )
     .await;
     assert!(

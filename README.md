@@ -164,7 +164,7 @@ Build or install the stdio language server from this workspace:
 cargo install --path radiant-lsp
 ```
 
-`radiant-lsp` provides live parser diagnostics, document symbols, built-in section and block completion, template ID and user-tag completion, hover documentation, and go-to-definition for local declarations, includes and user tags. It discovers templates below each workspace's `templates/` directory and refreshes them when the editor reports file changes.
+`radiant-lsp` provides live parser diagnostics, document symbols, snippet completion for built-in sections, scoped variables, template IDs, user tags, referenced fragments and layout blocks, hover documentation, and go-to-definition for local declarations, includes and user tags. Completion candidates are filtered and ranked server-side. It discovers templates below each workspace's `templates/` directory and refreshes them when the editor reports file changes.
 
 For Neovim 0.11 or newer, mark files below `templates/` as Radiant templates and enable the built-in LSP client:
 

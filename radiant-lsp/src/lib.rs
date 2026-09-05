@@ -7,7 +7,7 @@ mod semantic;
 mod symbols;
 mod workspace;
 
-use std::sync::Mutex;
+use std::{collections::BTreeMap, sync::Mutex};
 
 pub use documents::{DocumentSnapshot, DocumentStore};
 pub use line_index::LineIndex;
@@ -35,6 +35,7 @@ pub struct Backend {
     documents: Mutex<DocumentStore>,
     workspace: Mutex<WorkspaceIndex>,
     register_file_watcher: Mutex<bool>,
+    snippet_completion: Mutex<bool>,
 }
 
 impl Backend {
@@ -45,6 +46,7 @@ impl Backend {
             documents: Mutex::new(DocumentStore::default()),
             workspace: Mutex::new(WorkspaceIndex::default()),
             register_file_watcher: Mutex::new(false),
+            snippet_completion: Mutex::new(false),
         }
     }
 
@@ -90,6 +92,17 @@ impl LanguageServer for Backend {
             .register_file_watcher
             .lock()
             .expect("file watcher state poisoned") = dynamic_watching;
+        *self
+            .snippet_completion
+            .lock()
+            .expect("snippet completion state poisoned") = params
+            .capabilities
+            .text_document
+            .as_ref()
+            .and_then(|text| text.completion.as_ref())
+            .and_then(|completion| completion.completion_item.as_ref())
+            .and_then(|item| item.snippet_support)
+            .unwrap_or(false);
         let roots: Vec<_> = params
             .workspace_folders
             .filter(|folders| !folders.is_empty())
@@ -172,14 +185,28 @@ impl LanguageServer for Backend {
         let documents = self.documents.lock().expect("document store poisoned");
         let workspace = self.workspace.lock().expect("workspace index poisoned");
         let uri = &params.text_document_position.text_document.uri;
-        let template_ids = workspace.template_ids(uri);
-        let tag_names = workspace.tag_names(uri);
+        let mut analyses = workspace
+            .analyses(uri)
+            .into_iter()
+            .map(|(id, analysis)| (id.to_owned(), analysis))
+            .collect::<BTreeMap<_, _>>();
+        for (open_uri, open) in documents.iter() {
+            if workspace.shares_root(uri, open_uri)
+                && let Some(id) = workspace.template_id(open_uri)
+            {
+                analyses.insert(id, &open.analysis);
+            }
+        }
+        let snippets = *self
+            .snippet_completion
+            .lock()
+            .expect("snippet completion state poisoned");
         Ok(documents.get(uri).map(|snapshot| {
             CompletionResponse::Array(completion::completions(
                 snapshot,
                 params.text_document_position.position,
-                &template_ids,
-                &tag_names,
+                &analyses,
+                snippets,
             ))
         }))
     }

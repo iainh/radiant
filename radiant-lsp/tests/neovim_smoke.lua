@@ -6,7 +6,7 @@ local root = vim.fn.tempname()
 local templates = root .. "/templates"
 vim.fn.mkdir(templates .. "/layouts", "p")
 vim.fn.mkdir(templates .. "/tags", "p")
-vim.fn.writefile({ "<main>{#insert body /}</main>" }, templates .. "/layouts/base.html")
+vim.fn.writefile({ "<main>{#insert header}{/insert}{#insert body /}{#insert footer}{/insert}</main>" }, templates .. "/layouts/base.html")
 vim.fn.writefile({ "<article>{#nested-content /}</article>" }, templates .. "/tags/card.html")
 vim.fn.writefile({ "{#fragment present /}" }, templates .. "/fragments.html")
 vim.fn.writefile({ "{#include page /}" }, templates .. "/cycle.html")
@@ -62,7 +62,7 @@ end
 vim.fn.mkdir(templates .. "/tags", "p")
 vim.fn.writefile({ "created" }, templates .. "/missing.html")
 vim.fn.writefile({ "created" }, templates .. "/tags/lost.html")
-vim.fn.writefile({ "{#fragment absent /}" }, templates .. "/fragments.html")
+vim.fn.writefile({ "{#fragment present /}{#capture private /}{#fragment absent /}" }, templates .. "/fragments.html")
 vim.fn.writefile({ "cycle fixed" }, templates .. "/cycle.html")
 client:notify("workspace/didChangeWatchedFiles", {
   changes = {
@@ -126,14 +126,17 @@ local function replace(lines)
   end, 20), "Neovim did not synchronize the changed buffer")
 end
 
-local function completion_labels(position)
+local function completion_items(position)
   local completion = request("textDocument/completion", {
     textDocument = text_document(),
     position = position,
   })
+  return completion.items or completion
+end
+
+local function completion_labels(position)
   local labels = {}
-  local items = completion.items or completion
-  for _, item in ipairs(items) do
+  for _, item in ipairs(completion_items(position)) do
     labels[item.label] = true
   end
   return labels
@@ -147,9 +150,34 @@ local sections = completion_labels({ line = 0, character = 2 })
 assert(sections["if"], "built-in section completion was missing")
 assert(sections.card, "user-tag completion was missing")
 
+replace({ "{#i" })
+local filtered = completion_items({ line = 0, character = 3 })
+assert(#filtered == 3, "typed section prefix was not filtered server-side")
+assert(filtered[1].label == "if" and filtered[2].label == "insert" and filtered[3].label == "include",
+  "typed section completion relevance order was not deterministic: " .. vim.inspect(filtered))
+assert(filtered[1].kind == vim.lsp.protocol.CompletionItemKind.Snippet, "built-in section was not a snippet item")
+assert(filtered[1].insertText == "if ${1:condition}}${0}{/if}", "if snippet shape was incorrect")
+assert(filtered[1].insertTextFormat == vim.lsp.protocol.InsertTextFormat.Snippet, "snippet insertion format was not advertised")
+
+replace({ "{#n" })
+local nested = completion_items({ line = 0, character = 3 })
+assert(#nested == 1 and nested[1].label == "nested-content", "self-closing completion was missing")
+assert(nested[1].insertText == "nested-content /}" and not nested[1].insertText:find("{/", 1, true),
+  "self-closing completion incorrectly added a closing tag")
+
+replace({ "{#include fragments$p" })
+local fragments = completion_items({ line = 0, character = 21 })
+assert(#fragments == 2 and fragments[1].label == "present" and fragments[2].label == "private",
+  "fragment/capture completions were missing or unordered: " .. vim.inspect(fragments))
+
+replace({ "{#include layouts/base}{#b" })
+local layout_blocks = completion_items({ line = 0, character = 26 })
+assert(#layout_blocks == 1 and layout_blocks[1].label == "body",
+  "included layout block completion was missing: " .. vim.inspect(layout_blocks))
+
 client:stop()
 assert(vim.wait(5000, function()
   return client:is_stopped()
 end, 20), "radiant-lsp did not stop cleanly")
 vim.fn.delete(root, "rf")
-print("radiant-lsp Neovim acceptance: parser and cross-template diagnostics, watcher clearing, symbols, completion, hover and definitions passed")
+print("radiant-lsp Neovim 0.11.4 acceptance: diagnostics/watchers, symbols, hover, definitions, typed completion order, negotiated snippets, fragments/captures and layout blocks passed")

@@ -1,13 +1,15 @@
-use radiant_compiler::{BUILT_IN_SECTIONS, Node, Section, Span, built_in_block_names};
-use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position};
+use std::collections::{BTreeMap, BTreeSet};
+
+use radiant_compiler::{Analysis, BUILT_IN_SECTIONS, Node, Section, Span, built_in_block_names};
+use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat, Position};
 
 use crate::{DocumentSnapshot, semantic::SemanticIndex};
 
 pub(crate) fn completions(
     snapshot: &DocumentSnapshot,
     position: Position,
-    template_ids: &[String],
-    tag_names: &[String],
+    analyses: &BTreeMap<String, &Analysis>,
+    snippets: bool,
 ) -> Vec<CompletionItem> {
     let cursor = snapshot.line_index.position_to_byte(position);
     let LexicalContext::Tag { start, content } = lexical_context(&snapshot.text, cursor) else {
@@ -15,20 +17,38 @@ pub(crate) fn completions(
     };
 
     if let Some(section_prefix) = content.strip_prefix('#') {
-        if include_id_position(section_prefix) {
-            return template_ids
-                .iter()
-                .map(|id| item(id, CompletionItemKind::FILE, "template"))
-                .collect();
+        if let Some(reference) = include_reference_prefix(section_prefix) {
+            if let Some((target, prefix)) = reference.split_once('$') {
+                let target = if target.is_empty() {
+                    Some(&snapshot.analysis)
+                } else {
+                    analyses.get(target).copied()
+                };
+                return ranked(
+                    target
+                        .into_iter()
+                        .flat_map(fragment_names)
+                        .map(|name| item(name, CompletionItemKind::REFERENCE, "fragment")),
+                    prefix,
+                );
+            }
+            return ranked(
+                analyses
+                    .keys()
+                    .map(|id| item(id, CompletionItemKind::FILE, "template")),
+                reference,
+            );
         }
         if !section_prefix.chars().any(char::is_whitespace) {
             let mut items = BUILT_IN_SECTIONS
                 .iter()
-                .map(|name| item(name, CompletionItemKind::KEYWORD, "built-in section"))
+                .map(|name| section_item(name, snippets))
                 .collect::<Vec<_>>();
             items.extend(
-                tag_names
-                    .iter()
+                analyses
+                    .keys()
+                    .filter_map(|id| id.strip_prefix("tags/"))
+                    .filter(|name| !BUILT_IN_SECTIONS.contains(name))
                     .map(|name| item(name, CompletionItemKind::REFERENCE, "user tag")),
             );
             if let Some(parent) = containing_section(&snapshot.analysis.template.nodes, start) {
@@ -37,8 +57,22 @@ pub(crate) fn completions(
                         .iter()
                         .map(|name| item(name, CompletionItemKind::KEYWORD, "section block")),
                 );
+                if parent.name == "include"
+                    && let Some(target) = parent.arguments.first().and_then(|argument| {
+                        (argument.name.is_none())
+                            .then(|| argument.static_text())
+                            .flatten()
+                    })
+                    && let Some(target) = target.split('$').next()
+                    && let Some(analysis) = analyses.get(target)
+                {
+                    items.extend(
+                        insert_names(analysis)
+                            .map(|name| item(name, CompletionItemKind::REFERENCE, "layout block")),
+                    );
+                }
             }
-            return items;
+            return ranked(items, section_prefix);
         }
         if !section_expression_position(section_prefix) {
             return Vec::new();
@@ -51,34 +85,36 @@ pub(crate) fn completions(
         return Vec::new();
     }
 
-    SemanticIndex::new(&snapshot.analysis.template.nodes, &snapshot.text)
-        .visible_declarations(cursor)
-        .into_iter()
-        .map(|declaration| {
-            item(
-                &declaration.name,
-                CompletionItemKind::VARIABLE,
-                &declaration.detail(),
-            )
-        })
-        .collect()
+    let prefix = identifier_prefix(content);
+    ranked(
+        SemanticIndex::new(&snapshot.analysis.template.nodes, &snapshot.text)
+            .visible_declarations(cursor)
+            .into_iter()
+            .map(|declaration| {
+                item(
+                    &declaration.name,
+                    CompletionItemKind::VARIABLE,
+                    &declaration.detail(),
+                )
+            }),
+        prefix,
+    )
 }
 
-fn include_id_position(section: &str) -> bool {
-    let Some(arguments) = section.strip_prefix("include") else {
-        return false;
-    };
+fn include_reference_prefix(section: &str) -> Option<&str> {
+    let arguments = section.strip_prefix("include")?;
     if arguments.is_empty() || !arguments.starts_with(char::is_whitespace) {
-        return false;
+        return None;
     }
     let argument = arguments.trim_start();
     let Some(first) = argument.chars().next() else {
-        return true;
+        return Some("");
     };
     if matches!(first, '\'' | '"') {
-        return !argument[first.len_utf8()..].contains(first);
+        let content = &argument[first.len_utf8()..];
+        return (!content.contains(first)).then_some(content);
     }
-    !argument.chars().any(char::is_whitespace)
+    (!argument.chars().any(char::is_whitespace)).then_some(argument)
 }
 
 fn item(label: &str, kind: CompletionItemKind, detail: &str) -> CompletionItem {
@@ -88,6 +124,111 @@ fn item(label: &str, kind: CompletionItemKind, detail: &str) -> CompletionItem {
         detail: Some(detail.into()),
         ..CompletionItem::default()
     }
+}
+
+fn section_item(name: &str, snippets: bool) -> CompletionItem {
+    let Some((snippet, plain)) = section_insert_text(name) else {
+        return item(name, CompletionItemKind::KEYWORD, "built-in section");
+    };
+    CompletionItem {
+        insert_text: Some(if snippets { snippet } else { plain }.into()),
+        insert_text_format: snippets.then_some(InsertTextFormat::SNIPPET),
+        ..item(name, CompletionItemKind::SNIPPET, "built-in section")
+    }
+}
+
+fn section_insert_text(name: &str) -> Option<(&'static str, &'static str)> {
+    Some(match name {
+        "if" => ("if ${1:condition}}${0}{/if}", "if condition}{/if}"),
+        "for" => (
+            "for ${1:item} in ${2:items}}${0}{/for}",
+            "for item in items}{/for}",
+        ),
+        "each" => ("each ${1:items}}${0}{/each}", "each items}{/each}"),
+        "let" => (
+            "let ${1:name}=${2:value}}${0}{/let}",
+            "let name=value}{/let}",
+        ),
+        "set" => (
+            "set ${1:name}=${2:value}}${0}{/set}",
+            "set name=value}{/set}",
+        ),
+        "with" => ("with ${1:value}}${0}{/with}", "with value}{/with}"),
+        "when" => ("when ${1:value}}${0}{/when}", "when value}{/when}"),
+        "switch" => ("switch ${1:value}}${0}{/switch}", "switch value}{/switch}"),
+        "include" => ("include ${1:template-id} /}", "include template-id /}"),
+        "insert" => ("insert ${1:name}}${0}{/insert}", "insert name}{/insert}"),
+        "nested-content" => ("nested-content /}", "nested-content /}"),
+        "fragment" => (
+            "fragment ${1:name}}${0}{/fragment}",
+            "fragment name}{/fragment}",
+        ),
+        "capture" => (
+            "capture ${1:name}}${0}{/capture}",
+            "capture name}{/capture}",
+        ),
+        _ => return None,
+    })
+}
+
+fn fragment_names(analysis: &Analysis) -> impl Iterator<Item = &str> {
+    analysis
+        .template
+        .fragments()
+        .into_iter()
+        .filter_map(|section| section.arguments.first()?.static_text())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+}
+
+fn insert_names(analysis: &Analysis) -> impl Iterator<Item = &str> {
+    fn visit<'a>(nodes: &'a [Node], names: &mut BTreeSet<&'a str>) {
+        for node in nodes {
+            if let Node::Section(section) = node {
+                if section.name == "insert"
+                    && let Some(name) = section.arguments.first().and_then(|arg| arg.static_text())
+                {
+                    names.insert(name);
+                }
+                for block in &section.blocks {
+                    visit(&block.nodes, names);
+                }
+            }
+        }
+    }
+    let mut names = BTreeSet::new();
+    visit(&analysis.template.nodes, &mut names);
+    names.into_iter()
+}
+
+fn identifier_prefix(content: &str) -> &str {
+    let trimmed = content.trim_end();
+    let start = trimmed
+        .char_indices()
+        .rev()
+        .take_while(|(_, character)| character.is_alphanumeric() || *character == '_')
+        .last()
+        .map_or(trimmed.len(), |(at, _)| at);
+    &trimmed[start..]
+}
+
+fn ranked(items: impl IntoIterator<Item = CompletionItem>, prefix: &str) -> Vec<CompletionItem> {
+    let mut items = items
+        .into_iter()
+        .filter(|item| item.label.starts_with(prefix))
+        .collect::<Vec<_>>();
+    if !prefix.is_empty() {
+        items.sort_by(|left, right| {
+            (left.label != prefix)
+                .cmp(&(right.label != prefix))
+                .then_with(|| left.label.len().cmp(&right.label.len()))
+                .then_with(|| left.label.cmp(&right.label))
+        });
+    }
+    for (rank, item) in items.iter_mut().enumerate() {
+        item.sort_text = Some(format!("{rank:04}"));
+    }
+    items
 }
 
 fn section_expression_position(content: &str) -> bool {
@@ -251,7 +392,12 @@ fn contains(span: Span, cursor: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use tower_lsp::lsp_types::{CompletionItem, Position, Url};
+    use std::collections::BTreeMap;
+
+    use radiant_compiler::{Analysis, analyze};
+    use tower_lsp::lsp_types::{
+        CompletionItem, CompletionItemKind, InsertTextFormat, Position, Url,
+    };
 
     use crate::DocumentStore;
 
@@ -261,26 +407,49 @@ mod tests {
         workspace_labels(source, marker, &[], &[])
     }
 
+    fn items(
+        source: &str,
+        marker: &str,
+        templates: &[(&str, &str)],
+        snippets: bool,
+    ) -> Vec<CompletionItem> {
+        let cursor = source.find(marker).unwrap();
+        let source = source.replacen(marker, "", 1);
+        let uri = Url::parse("file:///workspace/templates/page.html").unwrap();
+        let mut documents = DocumentStore::default();
+        let snapshot = documents.open(uri, 1, source);
+        let owned = templates
+            .iter()
+            .map(|(id, source)| ((*id).to_owned(), analyze(id, source)))
+            .collect::<BTreeMap<String, Analysis>>();
+        let analyses = owned
+            .iter()
+            .map(|(id, analysis)| (id.clone(), analysis))
+            .collect();
+        completions(
+            snapshot,
+            snapshot.line_index.byte_to_position(cursor),
+            &analyses,
+            snippets,
+        )
+    }
+
     fn workspace_labels(
         source: &str,
         marker: &str,
         template_ids: &[String],
         tag_names: &[String],
     ) -> Vec<String> {
-        let cursor = source.find(marker).unwrap();
-        let source = source.replacen(marker, "", 1);
-        let uri = Url::parse("file:///workspace/templates/page.html").unwrap();
-        let mut documents = DocumentStore::default();
-        let snapshot = documents.open(uri, 1, source);
-        completions(
-            snapshot,
-            snapshot.line_index.byte_to_position(cursor),
-            template_ids,
-            tag_names,
-        )
-        .into_iter()
-        .map(|item: CompletionItem| item.label)
-        .collect()
+        let owned = template_ids
+            .iter()
+            .cloned()
+            .chain(tag_names.iter().map(|name| format!("tags/{name}")))
+            .collect::<Vec<String>>();
+        let templates = owned.iter().map(|id| (id.as_str(), "")).collect::<Vec<_>>();
+        items(source, marker, &templates, false)
+            .into_iter()
+            .map(|item: CompletionItem| item.label)
+            .collect()
     }
 
     #[test]
@@ -288,7 +457,8 @@ mod tests {
         let labels = labels("<main>{#i<CURSOR>", "<CURSOR>");
 
         assert!(labels.contains(&"if".into()));
-        assert!(labels.contains(&"fragment".into()));
+        assert!(labels.contains(&"include".into()));
+        assert!(!labels.contains(&"fragment".into()));
         assert!(!labels.contains(&"else".into()));
     }
 
@@ -299,11 +469,12 @@ mod tests {
 
         assert_eq!(
             workspace_labels("{#include 'lay<CURSOR>", "<CURSOR>", &templates, &tags),
-            templates
+            ["layouts/base"]
         );
-        let section_names = workspace_labels("{#ca<CURSOR>", "<CURSOR>", &templates, &tags);
-        assert!(section_names.contains(&"if".into()));
-        assert!(section_names.contains(&"card".into()));
+        assert_eq!(
+            workspace_labels("{#ca<CURSOR>", "<CURSOR>", &templates, &tags),
+            ["card", "capture"]
+        );
         assert!(
             workspace_labels(
                 "{#include layouts/base x=<CURSOR>",
@@ -337,7 +508,7 @@ mod tests {
         let source = "{@Vec<Item> items}{@String title}{#for item in items}{#let label=title}{la<CURSOR>}{/let}{/for}";
         let in_scope = labels(source, "<CURSOR>");
 
-        assert_eq!(in_scope, ["items", "title", "item", "label"]);
+        assert_eq!(in_scope, ["label"]);
         let outside = labels(
             "{@String title}{#let label=title}{label}{/let}{outside<CURSOR>}",
             "<CURSOR>",
@@ -374,8 +545,86 @@ mod tests {
         let snapshot = documents.open(uri, 1, source.into());
 
         assert_eq!(
-            completions(snapshot, Position::new(0, 20), &[], &[])[0].label,
+            completions(snapshot, Position::new(0, 20), &BTreeMap::new(), false)[0].label,
             "name"
+        );
+    }
+
+    #[test]
+    fn filters_and_deterministically_ranks_typed_prefixes() {
+        assert_eq!(
+            labels("{#i<CURSOR>", "<CURSOR>"),
+            ["if", "for", "each", "with", "switch", "insert", "include"]
+                .into_iter()
+                .filter(|label| label.starts_with('i'))
+                .collect::<Vec<_>>()
+        );
+        let ranked = labels(
+            "{@String item}{@String items}{@String itemized}{item<CURSOR>}",
+            "<CURSOR>",
+        );
+        assert_eq!(ranked, ["item", "items", "itemized"]);
+    }
+
+    #[test]
+    fn emits_snippets_only_for_capable_clients_and_self_closes_leaf_sections() {
+        let snippet = items("{#i<CURSOR>", "<CURSOR>", &[], true)
+            .into_iter()
+            .find(|item| item.label == "if")
+            .unwrap();
+        assert_eq!(snippet.kind, Some(CompletionItemKind::SNIPPET));
+        assert_eq!(
+            snippet.insert_text.as_deref(),
+            Some("if ${1:condition}}${0}{/if}")
+        );
+        assert_eq!(snippet.insert_text_format, Some(InsertTextFormat::SNIPPET));
+
+        let plain = items("{#i<CURSOR>", "<CURSOR>", &[], false)
+            .into_iter()
+            .find(|item| item.label == "include")
+            .unwrap();
+        assert_eq!(plain.insert_text.as_deref(), Some("include template-id /}"));
+        assert_eq!(plain.insert_text_format, None);
+        let nested = items("{#n<CURSOR>", "<CURSOR>", &[], true).remove(0);
+        assert_eq!(nested.insert_text.as_deref(), Some("nested-content /}"));
+        assert!(!nested.insert_text.as_deref().unwrap().contains("{/"));
+    }
+
+    #[test]
+    fn completes_fragments_and_layout_blocks_from_referenced_templates() {
+        let templates = [
+            (
+                "layouts/base",
+                "{#insert header}{/insert}{#if shown}{#insert body /}{/if}",
+            ),
+            (
+                "parts/card",
+                "{#fragment primary /}{#capture private /}{#fragment other /}",
+            ),
+        ];
+        assert_eq!(
+            items(
+                "{#include parts/card$pr<CURSOR>",
+                "<CURSOR>",
+                &templates,
+                false,
+            )
+            .into_iter()
+            .map(|item| item.label)
+            .collect::<Vec<_>>(),
+            ["primary", "private"]
+        );
+        assert_eq!(
+            items(
+                "{#include layouts/base}{#b<CURSOR>",
+                "<CURSOR>",
+                &templates,
+                false,
+            )
+            .into_iter()
+            .map(|item| item.label)
+            .collect::<Vec<_>>(),
+            ["body"]
         );
     }
 }

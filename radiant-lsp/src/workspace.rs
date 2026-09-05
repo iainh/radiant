@@ -6,7 +6,7 @@ use std::{
 
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
-use radiant_compiler::{Analysis, BUILT_IN_SECTIONS, analyze};
+use radiant_compiler::{Analysis, analyze};
 
 #[derive(Debug)]
 struct IndexedTemplate {
@@ -52,24 +52,6 @@ impl WorkspaceIndex {
         paths.sort();
         paths.dedup();
         self.roots = paths.into_iter().map(TemplateRoot::new).collect();
-    }
-
-    pub(crate) fn template_ids(&self, document: &Url) -> Vec<String> {
-        self.root_for_document(document)
-            .map(|root| root.files.keys().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn tag_names(&self, document: &Url) -> Vec<String> {
-        self.root_for_document(document)
-            .map(|root| {
-                root.files
-                    .keys()
-                    .filter_map(|id| id.strip_prefix("tags/").map(ToOwned::to_owned))
-                    .filter(|name| !BUILT_IN_SECTIONS.contains(&name.as_str()))
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     pub(crate) fn location(&self, document: &Url, id: &str) -> Option<Location> {
@@ -217,10 +199,13 @@ mod tests {
         let document = file_uri(&first.path().join("templates/page.html"));
 
         assert_eq!(
-            index.template_ids(&document),
+            index
+                .analyses(&document)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
             ["nested/card", "tags/admin/badge"]
         );
-        assert_eq!(index.tag_names(&document), ["admin/badge"]);
         assert!(index.location(&document, "nested/card").is_some());
         assert!(index.location(&document, "other").is_none());
         assert!(index.location(&document, "../outside").is_none());
@@ -241,11 +226,11 @@ mod tests {
         let created = first.path().join("templates/new.html");
         fs::write(&created, "new").unwrap();
         index.refresh_affected([file_uri(&created)]);
-        assert_eq!(index.template_ids(&first_document), ["new"]);
-        assert!(index.template_ids(&second_document).is_empty());
+        assert_eq!(index.analyses(&first_document)[0].0, "new");
+        assert!(index.analyses(&second_document).is_empty());
 
         fs::remove_file(&created).unwrap();
         index.refresh_affected([file_uri(&created)]);
-        assert!(index.template_ids(&first_document).is_empty());
+        assert!(index.analyses(&first_document).is_empty());
     }
 }
