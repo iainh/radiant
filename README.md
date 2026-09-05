@@ -212,23 +212,17 @@ For templates written by end users, start from `Engine::builder().restricted()`.
 
 ## Development
 
-```console
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-```
-
-The optional editor acceptance test requires Neovim 0.11.4, a built server binary and a compiled parser:
+The acceptance entry point runs formatting, a locked all-feature workspace build and test,
+Clippy with warnings denied, deterministic Tree-sitter generation and corpus tests, generated-source
+drift detection, the shared parser build, and the plugin-free Neovim editor smoke test:
 
 ```console
-cargo build -p radiant-lsp
-mkdir -p target/tree-sitter
-cc -O2 -fPIC -shared -I tree-sitter-radiant/src \
-  tree-sitter-radiant/src/parser.c tree-sitter-radiant/src/scanner.c \
-  -o target/tree-sitter/radiant.so
-RADIANT_LSP="$PWD/target/debug/radiant-lsp" \
-RADIANT_TS_PARSER="$PWD/target/tree-sitter/radiant.so" \
-  nvim --clean --headless -l radiant-lsp/tests/neovim_smoke.lua
+scripts/acceptance.sh
 ```
+
+It requires the pinned Rust and Node.js versions from `rust-toolchain.toml` and `.node-version`, a C
+compiler, and Neovim 0.11.4. npm installs the locked Tree-sitter CLI and grammar dependency. CI
+downloads the official Neovim archive and verifies its SHA-256 digest before running this same script.
 
 The design rationale, including how Radiant maps Qute concepts onto Rust and Axum, is in [`docs/research`](docs/research/).
 

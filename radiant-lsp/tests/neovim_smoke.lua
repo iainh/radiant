@@ -7,6 +7,7 @@ assert(tree_sitter_parser and tree_sitter_parser ~= "",
   "RADIANT_TS_PARSER must point to the compiled Radiant parser")
 assert(vim.fn.filereadable(tree_sitter_parser) == 1,
   "Radiant Tree-sitter parser is not readable: " .. tree_sitter_parser)
+assert(not vim.o.loadplugins, "the acceptance test must run without plugins")
 
 local grammar_root = vim.env.RADIANT_TS_ROOT or (vim.fn.getcwd() .. "/tree-sitter-radiant")
 local highlight_path = grammar_root .. "/queries/highlights.scm"
@@ -134,6 +135,31 @@ assert(vim.wait(5000, function()
   local current = vim.diagnostic.get(buffer)
   return #current == 1 and current[1].code == "E_EXPR_EXPECTED"
 end, 20), "creating and fixing referenced templates did not clear cross-template diagnostics")
+
+vim.fn.delete(templates .. "/missing.html")
+client:notify("workspace/didChangeWatchedFiles", {
+  changes = {
+    { uri = vim.uri_from_fname(templates .. "/missing.html"), type = 3 },
+  },
+})
+assert(vim.wait(5000, function()
+  for _, diagnostic in ipairs(vim.diagnostic.get(buffer)) do
+    if diagnostic.code == "E_TEMPLATE_NOT_FOUND" then
+      return true
+    end
+  end
+  return false
+end, 20), "deleting a referenced template did not restore its diagnostic")
+vim.fn.writefile({ "recreated" }, templates .. "/missing.html")
+client:notify("workspace/didChangeWatchedFiles", {
+  changes = {
+    { uri = vim.uri_from_fname(templates .. "/missing.html"), type = 1 },
+  },
+})
+assert(vim.wait(5000, function()
+  local current = vim.diagnostic.get(buffer)
+  return #current == 1 and current[1].code == "E_EXPR_EXPECTED"
+end, 20), "recreating a deleted template did not clear its diagnostic")
 
 local function text_document()
   return { uri = vim.uri_from_bufnr(buffer) }
@@ -331,4 +357,4 @@ assert(vim.wait(5000, function()
 end, 20), "radiant-lsp did not stop cleanly")
 vim.fn.delete(root, "rf")
 vim.fn.delete(added_root, "rf")
-print("radiant Neovim 0.11.4 acceptance: compiled Tree-sitter parser and HTML/Radiant captures; dynamic workspace add/remove with open-document service; debounced watched-file bursts and diagnostic clearing; exact definitions, references and multi-root workspace symbols; hover, typed completion order, negotiated snippets, fragments/captures and layout blocks passed")
+print("radiant Neovim 0.11.4 acceptance: no plugins; compiled Tree-sitter parser and HTML/Radiant captures; dynamic workspace add/remove with open-document service; watched-file create/change/delete updates and diagnostics; exact definitions, references and multi-root workspace symbols; hover, typed completion order, negotiated snippets, fragments/captures and layout blocks passed")
