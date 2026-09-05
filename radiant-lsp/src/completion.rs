@@ -1,7 +1,7 @@
-use radiant_compiler::{Argument, BUILT_IN_SECTIONS, Node, Section, Span, built_in_block_names};
+use radiant_compiler::{BUILT_IN_SECTIONS, Node, Section, Span, built_in_block_names};
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position};
 
-use crate::DocumentSnapshot;
+use crate::{DocumentSnapshot, semantic::SemanticIndex};
 
 pub(crate) fn completions(snapshot: &DocumentSnapshot, position: Position) -> Vec<CompletionItem> {
     let cursor = snapshot.line_index.position_to_byte(position);
@@ -34,16 +34,16 @@ pub(crate) fn completions(snapshot: &DocumentSnapshot, position: Position) -> Ve
         return Vec::new();
     }
 
-    let mut bindings = Vec::new();
-    collect_bindings(
-        &snapshot.analysis.template.nodes,
-        cursor,
-        &snapshot.text,
-        &mut bindings,
-    );
-    bindings
+    SemanticIndex::new(&snapshot.analysis.template.nodes, &snapshot.text)
+        .visible_declarations(cursor)
         .into_iter()
-        .map(|binding| item(&binding.name, CompletionItemKind::VARIABLE, &binding.detail))
+        .map(|declaration| {
+            item(
+                &declaration.name,
+                CompletionItemKind::VARIABLE,
+                &declaration.detail(),
+            )
+        })
         .collect()
 }
 
@@ -209,87 +209,6 @@ fn containing_section(nodes: &[Node], cursor: usize) -> Option<&Section> {
                 .unwrap_or(section)
         })
     })
-}
-
-#[derive(Debug)]
-struct Binding {
-    name: String,
-    detail: String,
-}
-
-fn collect_bindings(nodes: &[Node], cursor: usize, text: &str, bindings: &mut Vec<Binding>) {
-    for node in nodes {
-        if let Node::Parameter(parameter) = node {
-            push_binding(
-                bindings,
-                &parameter.name,
-                format!("parameter: {}", parameter.type_name),
-            );
-        }
-    }
-
-    for node in nodes {
-        let Node::Section(section) = node else {
-            continue;
-        };
-        if !(section.span.start < cursor && cursor <= section.span.end) {
-            continue;
-        }
-        let Some((index, block)) = section.blocks.iter().enumerate().find(|(index, block)| {
-            let body_start = opening_end(text, block.span).unwrap_or(block.span.start);
-            let body_end = section
-                .blocks
-                .get(index + 1)
-                .map_or(section.span.end, |next| next.span.start);
-            body_start <= cursor && cursor <= body_end
-        }) else {
-            return;
-        };
-        if index == 0 {
-            section_bindings(section, bindings);
-        }
-        collect_bindings(&block.nodes, cursor, text, bindings);
-        return;
-    }
-}
-
-fn section_bindings(section: &Section, bindings: &mut Vec<Binding>) {
-    match section.name.as_str() {
-        "for" | "each" => {
-            let alias = section
-                .arguments
-                .iter()
-                .find(|argument| argument.name.as_deref() == Some("alias"))
-                .and_then(Argument::static_text)
-                .unwrap_or("it");
-            push_binding(bindings, alias, "loop alias".into());
-        }
-        "let" | "set" => {
-            for name in section
-                .arguments
-                .iter()
-                .filter_map(|argument| argument.name.as_deref())
-            {
-                push_binding(bindings, name, "local binding".into());
-            }
-        }
-        _ => {}
-    }
-}
-
-fn push_binding(bindings: &mut Vec<Binding>, name: &str, detail: String) {
-    if let Some(existing) = bindings.iter_mut().find(|binding| binding.name == name) {
-        existing.detail = detail;
-    } else {
-        bindings.push(Binding {
-            name: name.into(),
-            detail,
-        });
-    }
-}
-
-fn opening_end(text: &str, span: Span) -> Option<usize> {
-    tag_end(&text[span.start + 1..]).map(|relative| span.start + relative + 2)
 }
 
 fn contains(span: Span, cursor: usize) -> bool {

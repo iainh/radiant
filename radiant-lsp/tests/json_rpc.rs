@@ -66,6 +66,11 @@ async fn stdio_server_publishes_updates_rejects_stale_versions_and_clears_on_clo
         initialized["result"]["capabilities"]["completionProvider"]["triggerCharacters"],
         json!(["{", "#"])
     );
+    assert_eq!(initialized["result"]["capabilities"]["hoverProvider"], true);
+    assert_eq!(
+        initialized["result"]["capabilities"]["definitionProvider"],
+        true
+    );
 
     send(
         &mut stdin,
@@ -121,6 +126,57 @@ async fn stdio_server_publishes_updates_rejects_stale_versions_and_clears_on_clo
     assert_eq!(completion["result"][0]["label"], "name");
     assert_eq!(completion["result"][0]["kind"], 6);
     assert_eq!(completion["result"][0]["detail"], "parameter: String");
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":5,"method":"textDocument/hover","params":{"textDocument":{"uri":uri},"position":{"line":1,"character":2}}}),
+    )
+    .await;
+    let section_hover = receive(&mut stdout).await;
+    assert_eq!(section_hover["id"], 5);
+    assert_eq!(section_hover["result"]["contents"]["kind"], "markdown");
+    assert_eq!(
+        section_hover["result"]["contents"]["value"],
+        "```radiant\n{#if condition}…{/if}\n```\n\nConditionally renders its body."
+    );
+    assert_eq!(
+        section_hover["result"]["range"],
+        json!({"start":{"line":1,"character":2},"end":{"line":1,"character":4}})
+    );
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":6,"method":"textDocument/hover","params":{"textDocument":{"uri":uri},"position":{"line":1,"character":11}}}),
+    )
+    .await;
+    let declaration_hover = receive(&mut stdout).await;
+    assert_eq!(declaration_hover["id"], 6);
+    assert_eq!(
+        declaration_hover["result"]["contents"]["value"],
+        "**parameter** `name`\n\nType: `String`"
+    );
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":7,"method":"textDocument/definition","params":{"textDocument":{"uri":uri},"position":{"line":1,"character":11}}}),
+    )
+    .await;
+    let definition = receive(&mut stdout).await;
+    assert_eq!(definition["id"], 7);
+    assert_eq!(definition["result"]["uri"], uri);
+    assert_eq!(
+        definition["result"]["range"],
+        json!({"start":{"line":0,"character":11},"end":{"line":0,"character":15}})
+    );
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":8,"method":"textDocument/definition","params":{"textDocument":{"uri":uri},"position":{"line":1,"character":22}}}),
+    )
+    .await;
+    let unknown_definition = receive(&mut stdout).await;
+    assert_eq!(unknown_definition["id"], 8);
+    assert!(unknown_definition["result"].is_null());
 
     send(
         &mut stdin,

@@ -1,6 +1,8 @@
 mod completion;
 mod documents;
 mod line_index;
+mod navigation;
+mod semantic;
 mod symbols;
 
 use std::sync::Mutex;
@@ -15,7 +17,8 @@ use tower_lsp::{
     lsp_types::{
         CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
         DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-        DocumentSymbolParams, DocumentSymbolResponse, InitializeParams, InitializeResult,
+        DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
+        Hover, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
         InitializedParams, MessageType, NumberOrString, OneOf, ServerCapabilities, ServerInfo,
         TextDocumentSyncCapability, TextDocumentSyncKind, Url,
     },
@@ -56,6 +59,8 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec!["{".into(), "#".into()]),
                     ..CompletionOptions::default()
                 }),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
@@ -94,6 +99,28 @@ impl LanguageServer for Backend {
                     snapshot,
                     params.text_document_position.position,
                 ))
+            }))
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let documents = self.documents.lock().expect("document store poisoned");
+        Ok(documents
+            .get(&params.text_document_position_params.text_document.uri)
+            .and_then(|snapshot| {
+                navigation::hover(snapshot, params.text_document_position_params.position)
+            }))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let documents = self.documents.lock().expect("document store poisoned");
+        let document = &params.text_document_position_params;
+        Ok(documents
+            .get(&document.text_document.uri)
+            .and_then(|snapshot| {
+                navigation::definition(snapshot, &document.text_document.uri, document.position)
             }))
     }
 
