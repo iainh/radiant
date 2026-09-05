@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+run_step() {
+    local description="$1"
+    shift
+
+    local start=$SECONDS
+    printf '==> %s\n' "$description"
+    "$@"
+    printf '<== %s (%ss)\n' "$description" "$((SECONDS - start))"
+}
+
+if [ -f "$HOME/.cargo/env" ]; then
+    # shellcheck disable=SC1091
+    source "$HOME/.cargo/env"
+fi
+
+if ! command -v rustup >/dev/null 2>&1; then
+    run_step "Install rustup" bash -c \
+        'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path'
+
+    # rustup cannot update the environment of this running setup process.
+    # shellcheck disable=SC1091
+    source "$HOME/.cargo/env"
+fi
+
+profile_marker="# radiant Rust toolchain"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+    cat >> "$HOME/.bash_profile" <<'EOF'
+
+# radiant Rust toolchain
+if [ -f "$HOME/.cargo/env" ]; then
+    . "$HOME/.cargo/env"
+fi
+EOF
+fi
+
+run_step "Install stable Rust with rustfmt and Clippy" \
+    rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+run_step "Select stable Rust" rustup default stable
+run_step "Fetch locked dependencies" cargo fetch --locked
+run_step "Precompile workspace tests" \
+    cargo test --locked --workspace --all-features --no-run
