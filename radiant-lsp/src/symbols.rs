@@ -1,10 +1,82 @@
 use radiant_compiler::{Argument, Node, Section, Span};
-use tower_lsp::lsp_types::{DocumentSymbol, SymbolKind};
+use tower_lsp::lsp_types::{DocumentSymbol, Location, SymbolInformation, SymbolKind};
 
-use crate::DocumentSnapshot;
+use crate::{
+    DocumentSnapshot, DocumentStore, LineIndex, semantic::SemanticIndex, workspace::WorkspaceIndex,
+};
 
 pub(crate) fn document_symbols(snapshot: &DocumentSnapshot) -> Vec<DocumentSymbol> {
     symbols_for_nodes(snapshot, &snapshot.analysis.template.nodes)
+}
+
+#[allow(deprecated)]
+pub(crate) fn workspace_symbols(
+    query: &str,
+    workspace: &WorkspaceIndex,
+    documents: &DocumentStore,
+) -> Vec<SymbolInformation> {
+    let query = query.to_lowercase();
+    let mut symbols = Vec::new();
+    for document in workspace.documents(documents, None) {
+        let lines = LineIndex::new(&document.analysis.template.source);
+        if document.id.to_lowercase().contains(&query) {
+            symbols.push(SymbolInformation {
+                name: document.id.clone(),
+                kind: SymbolKind::FILE,
+                tags: None,
+                deprecated: None,
+                location: Location::new(
+                    document.uri.clone(),
+                    lines.span_to_range(Span::new(0, document.analysis.template.source.len())),
+                ),
+                container_name: None,
+            });
+        }
+        let semantic = SemanticIndex::new(
+            &document.analysis.template.nodes,
+            &document.analysis.template.source,
+        );
+        for fragment in semantic.fragments() {
+            let qualified = format!("{}${}", document.id, fragment.name);
+            if fragment.name.to_lowercase().contains(&query)
+                || qualified.to_lowercase().contains(&query)
+            {
+                symbols.push(SymbolInformation {
+                    name: fragment.name.clone(),
+                    kind: SymbolKind::OBJECT,
+                    tags: None,
+                    deprecated: None,
+                    location: Location::new(
+                        document.uri.clone(),
+                        lines.span_to_range(fragment.name_span),
+                    ),
+                    container_name: Some(document.id.clone()),
+                });
+            }
+        }
+    }
+    symbols.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.location.uri.as_str().cmp(right.location.uri.as_str()))
+            .then_with(|| {
+                left.location
+                    .range
+                    .start
+                    .line
+                    .cmp(&right.location.range.start.line)
+            })
+            .then_with(|| {
+                left.location
+                    .range
+                    .start
+                    .character
+                    .cmp(&right.location.range.start.character)
+            })
+    });
+    symbols
 }
 
 fn symbols_for_nodes(snapshot: &DocumentSnapshot, nodes: &[Node]) -> Vec<DocumentSymbol> {
@@ -127,11 +199,14 @@ fn name_span(text: &str, span: Span, name: &str) -> Span {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
     use tower_lsp::lsp_types::{Position, SymbolKind, Url};
 
-    use crate::DocumentStore;
+    use crate::{DocumentStore, LineIndex, workspace::WorkspaceIndex};
 
-    use super::document_symbols;
+    use super::{document_symbols, workspace_symbols};
 
     #[test]
     fn builds_hierarchical_symbols_with_utf16_ranges() {
@@ -178,5 +253,58 @@ mod tests {
 
         assert_eq!(document_symbols(snapshot)[0].name, "good");
         assert!(!snapshot.analysis.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn workspace_symbols_filter_sort_multiple_roots_and_use_open_overlays() {
+        let first = tempdir().unwrap();
+        let second = tempdir().unwrap();
+        for root in [&first, &second] {
+            fs::create_dir_all(root.path().join("templates")).unwrap();
+        }
+        let first_path = first.path().join("templates/alpha.html");
+        let second_path = second.path().join("templates/beta.html");
+        fs::write(&first_path, "{#fragment stale /}").unwrap();
+        fs::write(&second_path, "{#capture shared /}").unwrap();
+        let first_uri = Url::from_file_path(&first_path).unwrap();
+        let open_uri = Url::from_file_path(first.path().join("templates/open.html")).unwrap();
+        let hidden_uri = Url::from_file_path(first.path().join("templates/.hidden.html")).unwrap();
+        let mut documents = DocumentStore::default();
+        documents.open(first_uri.clone(), 1, "😀{#fragment Shared /}".into());
+        documents.open(open_uri.clone(), 1, "{#capture overlay /}".into());
+        documents.open(hidden_uri, 1, "{#fragment hidden /}".into());
+        let mut workspace = WorkspaceIndex::default();
+        workspace.set_roots([
+            Url::from_file_path(second.path()).unwrap(),
+            Url::from_file_path(first.path()).unwrap(),
+        ]);
+
+        let symbols = workspace_symbols("SHAR", &workspace, &documents);
+        assert_eq!(
+            symbols
+                .iter()
+                .map(|symbol| (symbol.name.as_str(), symbol.container_name.as_deref()))
+                .collect::<Vec<_>>(),
+            [("Shared", Some("alpha")), ("shared", Some("beta"))]
+        );
+        assert_eq!(symbols[0].location.uri, first_uri);
+        assert_eq!(symbols[0].location.range.start, Position::new(0, 13));
+        assert!(workspace_symbols("stale", &workspace, &documents).is_empty());
+        assert!(workspace_symbols("hidden", &workspace, &documents).is_empty());
+
+        let overlays = workspace_symbols("overlay", &workspace, &documents);
+        assert_eq!(overlays.len(), 1);
+        assert_eq!(overlays[0].location.uri, open_uri);
+        assert_eq!(overlays[0].location.range.start, Position::new(0, 10));
+
+        let templates = workspace_symbols("a", &workspace, &documents);
+        assert!(templates.iter().any(|symbol| {
+            symbol.name == "alpha"
+                && symbol.kind == SymbolKind::FILE
+                && symbol.location.range.end
+                    == LineIndex::new("😀{#fragment Shared /}")
+                        .byte_to_position("😀{#fragment Shared /}".len())
+        }));
+        assert!(templates.iter().any(|symbol| symbol.name == "beta"));
     }
 }

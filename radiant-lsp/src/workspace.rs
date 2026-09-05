@@ -4,9 +4,11 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use tower_lsp::lsp_types::{FileChangeType, FileEvent, Location, Position, Range, Url};
+use tower_lsp::lsp_types::{FileChangeType, FileEvent, Url};
 
 use radiant_compiler::{Analysis, analyze};
+
+use crate::DocumentStore;
 
 #[derive(Debug)]
 struct IndexedTemplate {
@@ -80,6 +82,12 @@ pub(crate) struct WorkspaceIndex {
     roots: Vec<TemplateRoot>,
 }
 
+pub(crate) struct WorkspaceDocument<'a> {
+    pub(crate) id: String,
+    pub(crate) uri: Url,
+    pub(crate) analysis: &'a Analysis,
+}
+
 impl WorkspaceIndex {
     pub(crate) fn set_roots(&mut self, roots: impl IntoIterator<Item = Url>) {
         let mut paths = roots
@@ -111,15 +119,58 @@ impl WorkspaceIndex {
             .sort_by(|left, right| left.workspace.cmp(&right.workspace));
     }
 
-    pub(crate) fn location(&self, document: &Url, id: &str) -> Option<Location> {
-        if !safe_id(id) {
-            return None;
+    pub(crate) fn valid_id(&self, id: &str) -> bool {
+        safe_id(id)
+    }
+
+    pub(crate) fn documents<'a>(
+        &'a self,
+        open: &'a DocumentStore,
+        anchor: Option<&Url>,
+    ) -> Vec<WorkspaceDocument<'a>> {
+        let anchor_root = anchor.and_then(|uri| self.root_for_document(uri));
+        let mut documents = BTreeMap::new();
+        for root in &self.roots {
+            if anchor_root.is_some_and(|anchor| anchor.templates != root.templates) {
+                continue;
+            }
+            for (id, template) in &root.files {
+                if let Some(analysis) = &template.analysis
+                    && let Ok(uri) = Url::from_file_path(&template.path)
+                {
+                    documents.insert(
+                        uri.clone(),
+                        WorkspaceDocument {
+                            id: id.clone(),
+                            uri,
+                            analysis,
+                        },
+                    );
+                }
+            }
         }
-        let path = &self.root_for_document(document)?.files.get(id)?.path;
-        Some(Location::new(
-            Url::from_file_path(path).ok()?,
-            Range::new(Position::new(0, 0), Position::new(0, 0)),
-        ))
+        for (uri, snapshot) in open.iter() {
+            let Some(root) = self.root_for_document(uri) else {
+                continue;
+            };
+            if anchor_root.is_some_and(|anchor| anchor.templates != root.templates) {
+                continue;
+            }
+            if let Ok(path) = uri.to_file_path()
+                && !ignored_template_path(&root.templates, &path)
+                && let Some(id) = template_id(&root.templates, &path)
+            {
+                documents.insert(
+                    uri.clone(),
+                    WorkspaceDocument {
+                        id,
+                        uri: uri.clone(),
+                        analysis: &snapshot.analysis,
+                    },
+                );
+            }
+        }
+        documents.into_values().collect()
     }
 
     pub(crate) fn update_affected(&mut self, changed: impl IntoIterator<Item = FileEvent>) {
@@ -304,10 +355,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["nested/card", "tags/admin/badge"]
         );
-        assert!(index.location(&document, "nested/card").is_some());
-        assert!(index.location(&document, "other").is_none());
-        assert!(index.location(&document, "../outside").is_none());
-        assert!(index.location(&document, "/outside").is_none());
+        assert!(index.valid_id("nested/card"));
+        assert!(!index.valid_id("../outside"));
+        assert!(!index.valid_id("/outside"));
     }
 
     #[test]
@@ -418,6 +468,6 @@ mod tests {
             event(&colliding_backup, FileChangeType::CREATED),
         ]);
         assert_eq!(index.analyses(&document).len(), 2);
-        assert!(index.location(&document, "kept").is_some());
+        assert!(index.valid_id("kept"));
     }
 }

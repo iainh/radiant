@@ -1,12 +1,12 @@
-use radiant_compiler::{ArgumentValue, BUILT_IN_SECTIONS, Node, Span, built_in_block_names};
+use radiant_compiler::{BUILT_IN_SECTIONS, Span, built_in_block_names};
 use tower_lsp::lsp_types::{
     GotoDefinitionResponse, Hover, HoverContents, Location, MarkupContent, MarkupKind, Position,
     Url,
 };
 
 use crate::{
-    DocumentSnapshot,
-    semantic::{SemanticIndex, opening_name_span},
+    DocumentSnapshot, DocumentStore, LineIndex,
+    semantic::{SemanticIndex, TemplateReference},
     workspace::WorkspaceIndex,
 };
 
@@ -41,15 +41,64 @@ pub(crate) fn definition(
     uri: &Url,
     position: Position,
     workspace: &WorkspaceIndex,
+    documents: &DocumentStore,
 ) -> Option<GotoDefinitionResponse> {
     let cursor = snapshot.line_index.position_to_byte(position);
-    if let Some(id) =
-        template_reference_at(&snapshot.analysis.template.nodes, &snapshot.text, cursor)
-    {
-        let location = workspace.location(uri, &id)?;
-        return Some(GotoDefinitionResponse::Scalar(location));
-    }
     let semantic = SemanticIndex::new(&snapshot.analysis.template.nodes, &snapshot.text);
+    if let Some(reference) = semantic.template_reference_at(cursor) {
+        let source_id = workspace.template_id(uri)?;
+        let (target, fragment) = match reference {
+            TemplateReference::Include {
+                target,
+                target_span: _,
+                fragment,
+            } if fragment
+                .as_ref()
+                .is_some_and(|(_, span)| contains(*span, cursor)) =>
+            {
+                (
+                    if target.is_empty() {
+                        &source_id
+                    } else {
+                        target
+                    },
+                    fragment.as_ref().map(|(name, _)| name.as_str()),
+                )
+            }
+            TemplateReference::Include { target, .. } if !target.is_empty() => (target, None),
+            TemplateReference::Tag { target, .. } => (target, None),
+            TemplateReference::Include { .. } => return None,
+        };
+        if !workspace.valid_id(target) {
+            return None;
+        }
+        let target = workspace
+            .documents(documents, Some(uri))
+            .into_iter()
+            .find(|document| document.id == *target)?;
+        let range = if let Some(fragment) = fragment {
+            let target_semantic = SemanticIndex::new(
+                &target.analysis.template.nodes,
+                &target.analysis.template.source,
+            );
+            let declaration = target_semantic
+                .fragments()
+                .iter()
+                .find(|declaration| declaration.name == fragment)?;
+            LineIndex::new(&target.analysis.template.source).span_to_range(declaration.name_span)
+        } else {
+            Default::default()
+        };
+        return Some(GotoDefinitionResponse::Scalar(Location::new(
+            target.uri, range,
+        )));
+    }
+    if let Some(fragment) = semantic.fragment_at(cursor) {
+        return Some(GotoDefinitionResponse::Scalar(Location::new(
+            uri.clone(),
+            snapshot.line_index.span_to_range(fragment.name_span),
+        )));
+    }
     if semantic.construct_at(cursor).is_some() {
         return None;
     }
@@ -63,51 +112,194 @@ pub(crate) fn definition(
     )))
 }
 
-fn template_reference_at(nodes: &[Node], text: &str, cursor: usize) -> Option<String> {
-    for node in nodes {
-        let Node::Section(section) = node else {
-            continue;
-        };
-        if section.name == "include" {
-            let dynamic = section
-                .arguments
-                .iter()
-                .any(|argument| argument.name.as_deref() == Some("_id"))
-                || section
-                    .arguments
-                    .first()
-                    .and_then(|argument| match &argument.value {
-                        ArgumentValue::String(value) | ArgumentValue::Raw(value) => Some(value),
-                        ArgumentValue::Expression(_) => None,
-                    })
-                    .is_some_and(|value| value.starts_with("_id="));
-            if !dynamic
-                && let Some(argument) = section.arguments.first()
-                && argument.name.is_none()
-                && contains(argument.span, cursor)
-            {
-                let id = match &argument.value {
-                    ArgumentValue::String(value) | ArgumentValue::Raw(value) => value,
-                    ArgumentValue::Expression(_) => return None,
-                };
-                return Some(
-                    id.split_once('$')
-                        .map_or(id.as_str(), |(template, _)| template)
-                        .into(),
-                );
-            }
-        } else if !BUILT_IN_SECTIONS.contains(&section.name.as_str())
-            && contains(opening_name_span(text, section.span, &section.name), cursor)
-        {
-            return Some(format!("tags/{}", section.name));
+pub(crate) fn references(
+    snapshot: &DocumentSnapshot,
+    uri: &Url,
+    position: Position,
+    include_declaration: bool,
+    workspace: &WorkspaceIndex,
+    documents: &DocumentStore,
+) -> Option<Vec<Location>> {
+    let cursor = snapshot.line_index.position_to_byte(position);
+    let semantic = SemanticIndex::new(&snapshot.analysis.template.nodes, &snapshot.text);
+    if let Some(declaration) = semantic.declaration_at(cursor).or_else(|| {
+        let reference = semantic.reference_at(cursor)?;
+        semantic.resolve(&reference.name, cursor)
+    }) {
+        let mut locations = semantic
+            .references_to(declaration)
+            .into_iter()
+            .map(|reference| {
+                Location::new(
+                    uri.clone(),
+                    snapshot.line_index.span_to_range(reference.span),
+                )
+            })
+            .collect::<Vec<_>>();
+        if include_declaration {
+            locations.push(Location::new(
+                uri.clone(),
+                snapshot.line_index.span_to_range(declaration.name_span),
+            ));
         }
-        for block in &section.blocks {
-            if let Some(reference) = template_reference_at(&block.nodes, text, cursor) {
-                return Some(reference);
+        sort_locations(&mut locations);
+        return Some(locations);
+    }
+
+    let source_id = workspace.template_id(uri)?;
+    let target = if let Some(fragment) = semantic.fragment_at(cursor) {
+        ReferenceTarget::Fragment(source_id, fragment.name.clone())
+    } else {
+        match semantic.template_reference_at(cursor)? {
+            TemplateReference::Include {
+                target,
+                target_span,
+                fragment,
+            } if fragment
+                .as_ref()
+                .is_some_and(|(_, span)| contains(*span, cursor)) =>
+            {
+                ReferenceTarget::Fragment(
+                    if target.is_empty() {
+                        source_id
+                    } else {
+                        target.clone()
+                    },
+                    fragment.as_ref()?.0.clone(),
+                )
+            }
+            TemplateReference::Include {
+                target,
+                target_span,
+                ..
+            } if contains(*target_span, cursor) && !target.is_empty() => {
+                ReferenceTarget::Template(target.clone())
+            }
+            TemplateReference::Tag { target, .. } => ReferenceTarget::Template(target.clone()),
+            TemplateReference::Include { .. } => return None,
+        }
+    };
+
+    let workspace_documents = workspace.documents(documents, Some(uri));
+    if !workspace.valid_id(target.template_id()) {
+        return None;
+    }
+    let declaration = workspace_documents
+        .iter()
+        .find(|document| document.id == target.template_id())?;
+    if let ReferenceTarget::Fragment(_, name) = &target {
+        let target_semantic = SemanticIndex::new(
+            &declaration.analysis.template.nodes,
+            &declaration.analysis.template.source,
+        );
+        if !target_semantic
+            .fragments()
+            .iter()
+            .any(|fragment| fragment.name == *name)
+        {
+            return None;
+        }
+    }
+
+    let mut locations = Vec::new();
+    for document in &workspace_documents {
+        let index = SemanticIndex::new(
+            &document.analysis.template.nodes,
+            &document.analysis.template.source,
+        );
+        let lines = LineIndex::new(&document.analysis.template.source);
+        for reference in index.template_references() {
+            match (reference, &target) {
+                (
+                    TemplateReference::Include {
+                        target: referenced,
+                        target_span,
+                        fragment: _,
+                    },
+                    ReferenceTarget::Template(expected),
+                ) if referenced == expected => locations.push(Location::new(
+                    document.uri.clone(),
+                    lines.span_to_range(*target_span),
+                )),
+                (
+                    TemplateReference::Tag {
+                        target: referenced,
+                        span,
+                    },
+                    ReferenceTarget::Template(expected),
+                ) if referenced == expected => locations.push(Location::new(
+                    document.uri.clone(),
+                    lines.span_to_range(*span),
+                )),
+                (
+                    TemplateReference::Include {
+                        target: referenced,
+                        fragment: Some((fragment, span)),
+                        ..
+                    },
+                    ReferenceTarget::Fragment(expected_template, expected_fragment),
+                ) if (referenced == expected_template
+                    || referenced.is_empty() && document.id == *expected_template)
+                    && fragment == expected_fragment =>
+                {
+                    locations.push(Location::new(
+                        document.uri.clone(),
+                        lines.span_to_range(*span),
+                    ));
+                }
+                _ => {}
             }
         }
     }
-    None
+    if include_declaration {
+        let lines = LineIndex::new(&declaration.analysis.template.source);
+        let span = match &target {
+            ReferenceTarget::Template(_) => {
+                Span::new(0, declaration.analysis.template.source.len())
+            }
+            ReferenceTarget::Fragment(_, name) => {
+                SemanticIndex::new(
+                    &declaration.analysis.template.nodes,
+                    &declaration.analysis.template.source,
+                )
+                .fragments()
+                .iter()
+                .find(|fragment| fragment.name == *name)?
+                .name_span
+            }
+        };
+        locations.push(Location::new(
+            declaration.uri.clone(),
+            lines.span_to_range(span),
+        ));
+    }
+    sort_locations(&mut locations);
+    Some(locations)
+}
+
+enum ReferenceTarget {
+    Template(String),
+    Fragment(String, String),
+}
+
+impl ReferenceTarget {
+    fn template_id(&self) -> &str {
+        match self {
+            Self::Template(id) | Self::Fragment(id, _) => id,
+        }
+    }
+}
+
+fn sort_locations(locations: &mut [Location]) {
+    locations.sort_by(|left, right| {
+        left.uri
+            .as_str()
+            .cmp(right.uri.as_str())
+            .then_with(|| left.range.start.line.cmp(&right.range.start.line))
+            .then_with(|| left.range.start.character.cmp(&right.range.start.character))
+            .then_with(|| left.range.end.line.cmp(&right.range.end.line))
+            .then_with(|| left.range.end.character.cmp(&right.range.end.character))
+    });
 }
 
 const fn contains(span: Span, cursor: usize) -> bool {
@@ -202,7 +394,7 @@ mod tests {
 
     use crate::{DocumentStore, workspace::WorkspaceIndex};
 
-    use super::{definition, hover};
+    use super::{definition, hover, references};
 
     fn snapshot(source: &str) -> (Url, DocumentStore) {
         let uri = Url::parse("file:///workspace/templates/page.html").unwrap();
@@ -225,8 +417,15 @@ mod tests {
         snapshot: &crate::DocumentSnapshot,
         uri: &Url,
         position: Position,
+        documents: &DocumentStore,
     ) -> Option<tower_lsp::lsp_types::GotoDefinitionResponse> {
-        definition(snapshot, uri, position, &WorkspaceIndex::default())
+        definition(
+            snapshot,
+            uri,
+            position,
+            &WorkspaceIndex::default(),
+            documents,
+        )
     }
 
     #[test]
@@ -280,9 +479,13 @@ mod tests {
             ("{label}", "label=", "label".len()),
         ] {
             let use_at = source.rfind(usage).unwrap() + usize::from(usage.starts_with('{'));
-            let response =
-                local_definition(snapshot, &uri, snapshot.line_index.byte_to_position(use_at))
-                    .unwrap();
+            let response = local_definition(
+                snapshot,
+                &uri,
+                snapshot.line_index.byte_to_position(use_at),
+                &documents,
+            )
+            .unwrap();
             let tower_lsp::lsp_types::GotoDefinitionResponse::Scalar(location) = response else {
                 panic!("expected scalar definition")
             };
@@ -312,6 +515,7 @@ mod tests {
                 snapshot
                     .line_index
                     .byte_to_position(source.find(usage).unwrap() + 1),
+                &documents,
             )
             .unwrap();
             let tower_lsp::lsp_types::GotoDefinitionResponse::Scalar(location) = response else {
@@ -341,8 +545,13 @@ mod tests {
             let (uri, documents) = snapshot(source);
             let snapshot = documents.get(&uri).unwrap();
             assert!(
-                local_definition(snapshot, &uri, snapshot.line_index.byte_to_position(byte))
-                    .is_none()
+                local_definition(
+                    snapshot,
+                    &uri,
+                    snapshot.line_index.byte_to_position(byte),
+                    &documents,
+                )
+                .is_none()
             );
         }
     }
@@ -368,6 +577,7 @@ mod tests {
                 snapshot
                     .line_index
                     .byte_to_position(source.find("each").unwrap()),
+                &documents,
             )
             .is_none()
         );
@@ -400,6 +610,7 @@ mod tests {
                     .line_index
                     .byte_to_position(source.find(reference).unwrap()),
                 &templates,
+                &documents,
             )
             .unwrap();
             let tower_lsp::lsp_types::GotoDefinitionResponse::Scalar(location) = response else {
@@ -417,9 +628,187 @@ mod tests {
                         .line_index
                         .byte_to_position(source.find(reference).unwrap()),
                     &templates,
+                    &documents,
                 )
                 .is_none()
             );
         }
+    }
+
+    #[test]
+    fn references_follow_exact_lexical_bindings_and_declaration_context() {
+        let source = "😀{@String item}{item}{#for item in items}{item}{#let item='x'}{item}{/let}{item}{#else}{item}{/for}{item}";
+        let (uri, documents) = snapshot(source);
+        let snapshot = documents.get(&uri).unwrap();
+        let workspace = WorkspaceIndex::default();
+
+        let inner_use = source.find("{item}{/let}").unwrap() + 1;
+        let inner = references(
+            snapshot,
+            &uri,
+            snapshot.line_index.byte_to_position(inner_use),
+            true,
+            &workspace,
+            &documents,
+        )
+        .unwrap();
+        assert_eq!(inner.len(), 2);
+        assert_eq!(
+            inner[0].range.start,
+            snapshot
+                .line_index
+                .byte_to_position(source.find("item='x'").unwrap())
+        );
+        assert_eq!(
+            inner[1].range.start,
+            snapshot.line_index.byte_to_position(inner_use)
+        );
+
+        let parameter = references(
+            snapshot,
+            &uri,
+            snapshot
+                .line_index
+                .byte_to_position(source.find("item}").unwrap()),
+            false,
+            &workspace,
+            &documents,
+        )
+        .unwrap();
+        assert_eq!(parameter.len(), 3);
+        let parameter_uses = [
+            source.find("{item}").unwrap() + 1,
+            source.find("{#else}{item}").unwrap() + "{#else}{".len(),
+            source.rfind("{item}").unwrap() + 1,
+        ];
+        assert_eq!(
+            parameter
+                .iter()
+                .map(|location| location.range.start)
+                .collect::<Vec<_>>(),
+            parameter_uses.map(|byte| snapshot.line_index.byte_to_position(byte))
+        );
+    }
+
+    #[test]
+    fn fragment_definitions_and_references_use_exact_external_and_current_name_ranges() {
+        let workspace_dir = tempdir().unwrap();
+        let templates_dir = workspace_dir.path().join("templates");
+        fs::create_dir_all(&templates_dir).unwrap();
+        let fragments_path = templates_dir.join("fragments.html");
+        let fragment_source = "😀\n{#fragment café /}\n{#capture note /}";
+        fs::write(&fragments_path, fragment_source).unwrap();
+        let page_source = "{#include fragments$café /}{#include fragments$note /}";
+        let page_uri = Url::from_file_path(templates_dir.join("page.html")).unwrap();
+        let fragments_uri = Url::from_file_path(&fragments_path).unwrap();
+        let mut documents = DocumentStore::default();
+        documents.open(page_uri.clone(), 1, page_source.into());
+        documents.open(
+            fragments_uri.clone(),
+            1,
+            format!("{fragment_source}\n{{#include $café /}}"),
+        );
+        let mut workspace = WorkspaceIndex::default();
+        workspace.set_roots([Url::from_file_path(workspace_dir.path()).unwrap()]);
+        let page = documents.get(&page_uri).unwrap();
+
+        let definition = definition(
+            page,
+            &page_uri,
+            page.line_index
+                .byte_to_position(page_source.find("café").unwrap()),
+            &workspace,
+            &documents,
+        )
+        .unwrap();
+        let tower_lsp::lsp_types::GotoDefinitionResponse::Scalar(definition) = definition else {
+            panic!("expected scalar definition")
+        };
+        assert_eq!(definition.uri, fragments_uri);
+        assert_eq!(
+            definition.range,
+            tower_lsp::lsp_types::Range::new(Position::new(1, 11), Position::new(1, 15))
+        );
+
+        let fragment = documents.get(&fragments_uri).unwrap();
+        let locations = references(
+            fragment,
+            &fragments_uri,
+            fragment
+                .line_index
+                .byte_to_position(fragment.text.find("café").unwrap()),
+            true,
+            &workspace,
+            &documents,
+        )
+        .unwrap();
+        assert_eq!(locations.len(), 3);
+        assert_eq!(locations[0].uri, fragments_uri);
+        assert_eq!(locations[0].range.start, Position::new(1, 11));
+        assert_eq!(locations[1].range.start, Position::new(3, 11));
+        assert_eq!(locations[2].uri, page_uri);
+        assert_eq!(locations[2].range.start, Position::new(0, 20));
+    }
+
+    #[test]
+    fn references_find_static_includes_and_tags_but_exclude_dynamic_and_other_roots() {
+        let first = tempdir().unwrap();
+        let second = tempdir().unwrap();
+        for workspace in [&first, &second] {
+            fs::create_dir_all(workspace.path().join("templates/tags")).unwrap();
+            fs::write(workspace.path().join("templates/layout.html"), "layout").unwrap();
+            fs::write(workspace.path().join("templates/tags/card.html"), "card").unwrap();
+        }
+        let source = "{#include layout /}{#include _id=layout /}{#card /}{#card /}";
+        let first_uri = Url::from_file_path(first.path().join("templates/page.html")).unwrap();
+        let second_uri = Url::from_file_path(second.path().join("templates/page.html")).unwrap();
+        let mut documents = DocumentStore::default();
+        documents.open(first_uri.clone(), 1, source.into());
+        documents.open(second_uri, 1, source.into());
+        let mut workspace = WorkspaceIndex::default();
+        workspace.set_roots([
+            Url::from_file_path(first.path()).unwrap(),
+            Url::from_file_path(second.path()).unwrap(),
+        ]);
+        let snapshot = documents.get(&first_uri).unwrap();
+
+        let includes = references(
+            snapshot,
+            &first_uri,
+            snapshot
+                .line_index
+                .byte_to_position(source.find("layout").unwrap()),
+            false,
+            &workspace,
+            &documents,
+        )
+        .unwrap();
+        assert_eq!(includes.len(), 1);
+        assert_eq!(&snapshot.text[10..16], "layout");
+        assert_eq!(includes[0].range.start, Position::new(0, 10));
+
+        let tags = references(
+            snapshot,
+            &first_uri,
+            snapshot
+                .line_index
+                .byte_to_position(source.find("card").unwrap()),
+            true,
+            &workspace,
+            &documents,
+        )
+        .unwrap();
+        assert_eq!(tags.len(), 3);
+        let tag_starts = source
+            .match_indices("{#card")
+            .map(|(byte, _)| snapshot.line_index.byte_to_position(byte + 2))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tags.iter()
+                .filter(|location| location.uri == first_uri)
+                .map(|location| location.range.start)
+                .collect::<Vec<_>>(),
+            tag_starts
+        );
     }
 }

@@ -1,4 +1,4 @@
-use radiant_compiler::{Argument, ArgumentValue, Expr, Node, Section, Span};
+use radiant_compiler::{Argument, ArgumentValue, BUILT_IN_SECTIONS, Expr, Node, Section, Span};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DeclarationKind {
@@ -49,11 +49,32 @@ pub(crate) struct Reference {
     pub(crate) span: Span,
 }
 
+#[derive(Debug)]
+pub(crate) struct FragmentDeclaration {
+    pub(crate) name: String,
+    pub(crate) name_span: Span,
+}
+
+#[derive(Debug)]
+pub(crate) enum TemplateReference {
+    Include {
+        target: String,
+        target_span: Span,
+        fragment: Option<(String, Span)>,
+    },
+    Tag {
+        target: String,
+        span: Span,
+    },
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct SemanticIndex {
     declarations: Vec<Declaration>,
     constructs: Vec<Construct>,
     references: Vec<Reference>,
+    fragments: Vec<FragmentDeclaration>,
+    template_references: Vec<TemplateReference>,
 }
 
 impl SemanticIndex {
@@ -132,6 +153,48 @@ impl SemanticIndex {
             .find(|reference| contains(reference.span, cursor))
     }
 
+    pub(crate) fn references_to(&self, declaration: &Declaration) -> Vec<&Reference> {
+        self.references
+            .iter()
+            .filter(|reference| {
+                self.resolve(&reference.name, reference.span.start)
+                    .is_some_and(|resolved| resolved.name_span == declaration.name_span)
+            })
+            .collect()
+    }
+
+    pub(crate) fn fragments(&self) -> &[FragmentDeclaration] {
+        &self.fragments
+    }
+
+    pub(crate) fn fragment_at(&self, cursor: usize) -> Option<&FragmentDeclaration> {
+        self.fragments
+            .iter()
+            .find(|fragment| contains(fragment.name_span, cursor))
+    }
+
+    pub(crate) fn template_references(&self) -> &[TemplateReference] {
+        &self.template_references
+    }
+
+    pub(crate) fn template_reference_at(&self, cursor: usize) -> Option<&TemplateReference> {
+        self.template_references
+            .iter()
+            .find(|reference| match reference {
+                TemplateReference::Include {
+                    target_span,
+                    fragment,
+                    ..
+                } => {
+                    contains(*target_span, cursor)
+                        || fragment
+                            .as_ref()
+                            .is_some_and(|(_, span)| contains(*span, cursor))
+                }
+                TemplateReference::Tag { span, .. } => contains(*span, cursor),
+            })
+    }
+
     fn visit_sections(&mut self, nodes: &[Node], text: &str, depth: usize) {
         for node in nodes {
             if let Node::Output { expression, .. } = node {
@@ -145,6 +208,7 @@ impl SemanticIndex {
                 name_span: opening_name_span(text, section.span, &section.name),
                 parent: None,
             });
+            self.add_template_symbol(section, text);
             for argument in &section.arguments {
                 self.visit_argument(argument);
             }
@@ -272,6 +336,63 @@ impl SemanticIndex {
             depth,
         });
     }
+
+    fn add_template_symbol(&mut self, section: &Section, text: &str) {
+        if matches!(section.name.as_str(), "fragment" | "capture") {
+            if let Some(argument) = section.arguments.first()
+                && let Some(name) = argument.static_text()
+            {
+                self.fragments.push(FragmentDeclaration {
+                    name: name.into(),
+                    name_span: static_value_span(text, argument.span, name),
+                });
+            }
+            return;
+        }
+        if section.name == "include" {
+            if section
+                .arguments
+                .iter()
+                .any(|argument| argument.name.as_deref() == Some("_id"))
+            {
+                return;
+            }
+            let Some(argument) = section.arguments.first() else {
+                return;
+            };
+            if argument.name.is_some() {
+                return;
+            }
+            let value = match &argument.value {
+                ArgumentValue::String(value) | ArgumentValue::Raw(value) => value,
+                ArgumentValue::Expression(_) => return,
+            };
+            if value.starts_with("_id=") {
+                return;
+            }
+            let value_span = static_value_span(text, argument.span, value);
+            let (target, fragment) = value.split_once('$').map_or_else(
+                || (value.clone(), None),
+                |(target, fragment)| {
+                    let start = value_span.start + target.len() + 1;
+                    (
+                        target.into(),
+                        Some((fragment.into(), Span::new(start, start + fragment.len()))),
+                    )
+                },
+            );
+            self.template_references.push(TemplateReference::Include {
+                target_span: Span::new(value_span.start, value_span.start + target.len()),
+                target,
+                fragment,
+            });
+        } else if !BUILT_IN_SECTIONS.contains(&section.name.as_str()) {
+            self.template_references.push(TemplateReference::Tag {
+                target: format!("tags/{}", section.name),
+                span: opening_name_span(text, section.span, &section.name),
+            });
+        }
+    }
 }
 
 fn block_body_span(section: &Section, index: usize, text: &str) -> Span {
@@ -347,6 +468,10 @@ fn trimmed_value_span(text: &str, span: Span, value: &str) -> Span {
         .map_or(span, |at| {
             Span::new(span.start + at, span.start + at + value.len())
         })
+}
+
+pub(crate) fn static_value_span(text: &str, span: Span, value: &str) -> Span {
+    trimmed_value_span(text, span, value)
 }
 
 fn named_argument_span(text: &str, section: Span, value: Span, name: &str) -> Span {

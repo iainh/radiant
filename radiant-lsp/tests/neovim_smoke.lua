@@ -177,6 +177,49 @@ local tag_definition = request("textDocument/definition", {
 })
 assert(vim.uri_to_fname(tag_definition.uri) == templates .. "/tags/card.html", "tag definition targeted the wrong template")
 
+local fragment_definition = request("textDocument/definition", {
+  textDocument = text_document(),
+  position = { line = 7, character = 20 },
+})
+assert(vim.uri_to_fname(fragment_definition.uri) == templates .. "/fragments.html",
+  "fragment definition targeted the wrong template")
+assert(fragment_definition.range.start.line == 0 and fragment_definition.range.start.character == 52,
+  "fragment definition did not target the exact declaration name")
+assert(fragment_definition.range["end"].line == 0 and fragment_definition.range["end"].character == 58,
+  "fragment definition declaration range had the wrong end")
+
+local local_references = request("textDocument/references", {
+  textDocument = text_document(),
+  position = { line = 3, character = 12 },
+  context = { includeDeclaration = true },
+})
+assert(#local_references == 4, "parameter references did not include three uses and the declaration")
+local saw_parameter_declaration = false
+for _, location in ipairs(local_references) do
+  if location.range.start.line == 0 and location.range.start.character == 11
+      and location.range["end"].character == 15 then
+    saw_parameter_declaration = true
+  end
+end
+assert(saw_parameter_declaration, "parameter references omitted the exact declaration range")
+
+local fragment_references = request("textDocument/references", {
+  textDocument = text_document(),
+  position = { line = 7, character = 20 },
+  context = { includeDeclaration = true },
+})
+assert(#fragment_references == 2, "fragment references did not include its use and declaration")
+assert(vim.uri_to_fname(fragment_references[1].uri) == templates .. "/fragments.html"
+    and fragment_references[1].range.start.character == 52,
+  "fragment references omitted the exact declaration")
+
+local fragment_symbols = request("workspace/symbol", { query = "absent" })
+assert(#fragment_symbols == 1 and fragment_symbols[1].name == "absent",
+  "workspace symbol filtering did not return the fragment")
+assert(vim.uri_to_fname(fragment_symbols[1].location.uri) == templates .. "/fragments.html"
+    and fragment_symbols[1].location.range.start.character == 52,
+  "workspace fragment symbol had the wrong exact location")
+
 local function replace(lines)
   vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
   assert(vim.wait(5000, function()
@@ -258,6 +301,16 @@ assert(vim.wait(5000, function()
     and response.result[1].label == "dynamic"
 end, 20), "added workspace folder was not indexed")
 
+local added_symbols = request("workspace/symbol", { query = "dynamic" })
+assert(#added_symbols == 1 and added_symbols[1].name == "dynamic",
+  "workspace symbols did not include the second workspace root")
+assert(vim.uri_to_fname(added_symbols[1].location.uri) == added_templates .. "/dynamic.html"
+    and added_symbols[1].location.range.start.line == 0
+    and added_symbols[1].location.range.start.character == 0
+    and added_symbols[1].location.range["end"].line == 1
+    and added_symbols[1].location.range["end"].character == 0,
+  "second-root template symbol had the wrong exact location")
+
 client:notify("workspace/didChangeWorkspaceFolders", {
   event = {
     added = {},
@@ -278,4 +331,4 @@ assert(vim.wait(5000, function()
 end, 20), "radiant-lsp did not stop cleanly")
 vim.fn.delete(root, "rf")
 vim.fn.delete(added_root, "rf")
-print("radiant Neovim 0.11.4 acceptance: compiled Tree-sitter parser and HTML/Radiant captures; dynamic workspace add/remove with open-document service; debounced watched-file bursts and diagnostic clearing; symbols, hover, definitions, typed completion order, negotiated snippets, fragments/captures and layout blocks passed")
+print("radiant Neovim 0.11.4 acceptance: compiled Tree-sitter parser and HTML/Radiant captures; dynamic workspace add/remove with open-document service; debounced watched-file bursts and diagnostic clearing; exact definitions, references and multi-root workspace symbols; hover, typed completion order, negotiated snippets, fragments/captures and layout blocks passed")

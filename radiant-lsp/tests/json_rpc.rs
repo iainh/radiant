@@ -49,6 +49,15 @@ async fn receive_diagnostics(stdout: &mut BufReader<ChildStdout>, uri: &str) -> 
     }
 }
 
+async fn receive_response(stdout: &mut BufReader<ChildStdout>, id: i64) -> Value {
+    loop {
+        let message = receive(stdout).await;
+        if message["id"] == id {
+            return message;
+        }
+    }
+}
+
 #[tokio::test]
 async fn stdio_server_publishes_updates_rejects_stale_versions_and_clears_on_close() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_radiant-lsp"))
@@ -80,6 +89,14 @@ async fn stdio_server_publishes_updates_rejects_stale_versions_and_clears_on_clo
     assert_eq!(initialized["result"]["capabilities"]["hoverProvider"], true);
     assert_eq!(
         initialized["result"]["capabilities"]["definitionProvider"],
+        true
+    );
+    assert_eq!(
+        initialized["result"]["capabilities"]["referencesProvider"],
+        true
+    );
+    assert_eq!(
+        initialized["result"]["capabilities"]["workspaceSymbolProvider"],
         true
     );
 
@@ -248,6 +265,249 @@ async fn stdio_server_publishes_updates_rejects_stale_versions_and_clears_on_clo
 }
 
 #[tokio::test]
+async fn navigation_requests_respect_bindings_fragments_roots_and_open_overlays() {
+    let first = tempdir().unwrap();
+    let second = tempdir().unwrap();
+    for root in [&first, &second] {
+        fs::create_dir_all(root.path().join("templates/tags")).unwrap();
+    }
+    let definitions_path = first.path().join("templates/defs.html");
+    let layout_path = first.path().join("templates/layout.html");
+    let tag_path = first.path().join("templates/tags/card.html");
+    let other_path = second.path().join("templates/other.html");
+    fs::write(&definitions_path, "{#fragment stale /}").unwrap();
+    fs::write(&layout_path, "layout").unwrap();
+    fs::write(&tag_path, "card").unwrap();
+    fs::write(&other_path, "{#fragment Shared /}").unwrap();
+
+    let definitions_uri = tower_lsp::lsp_types::Url::from_file_path(&definitions_path).unwrap();
+    let page_uri =
+        tower_lsp::lsp_types::Url::from_file_path(first.path().join("templates/page.html"))
+            .unwrap();
+    let first_uri = tower_lsp::lsp_types::Url::from_file_path(first.path()).unwrap();
+    let second_uri = tower_lsp::lsp_types::Url::from_file_path(second.path()).unwrap();
+    let definitions = "😀\n{#fragment Shared /}\n{#capture Note /}\n{#include $Shared /}";
+    let page = concat!(
+        "😀{@String item}{item}\n",
+        "{#for item in items}{item}{#let item='x'}{item}{/let}{item}{/for}\n",
+        "{item}\n",
+        "{#include defs$Shared /}{#include defs$Note /}",
+        "{#include layout /}{#include _id=layout /}{#card /}{#card /}"
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_radiant-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    send(
+        &mut stdin,
+        json!({
+            "jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "workspaceFolders":[
+                    {"uri":first_uri,"name":"first"},
+                    {"uri":second_uri,"name":"second"}
+                ],
+                "capabilities":{}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(receive(&mut stdout).await["id"], 1);
+    for (uri, text) in [(&definitions_uri, definitions), (&page_uri, page)] {
+        send(
+            &mut stdin,
+            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+                "uri":uri,"languageId":"radiant","version":1,"text":text
+            }}}),
+        )
+        .await;
+        let diagnostics = receive_diagnostics(&mut stdout, uri.as_str()).await;
+        assert_eq!(diagnostics["params"]["diagnostics"], json!([]));
+    }
+
+    let page_lines = radiant_lsp::LineIndex::new(page);
+    let definitions_lines = radiant_lsp::LineIndex::new(definitions);
+    let parameter_use = page.find("{item}").unwrap() + 1;
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":2,"method":"textDocument/references","params":{
+            "textDocument":{"uri":page_uri},
+            "position":page_lines.byte_to_position(parameter_use),
+            "context":{"includeDeclaration":true}
+        }}),
+    )
+    .await;
+    let parameter_references = receive_response(&mut stdout, 2).await;
+    assert_eq!(parameter_references["result"].as_array().unwrap().len(), 3);
+    assert!(
+        parameter_references["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|location| {
+                location["range"]
+                    == json!(page_lines.span_to_range(radiant_compiler::Span::new(
+                        page.find("item}").unwrap(),
+                        page.find("item}").unwrap() + 4,
+                    )))
+            })
+    );
+
+    let local_use = page.find("{item}{/let}").unwrap() + 1;
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":3,"method":"textDocument/references","params":{
+            "textDocument":{"uri":page_uri},
+            "position":page_lines.byte_to_position(local_use),
+            "context":{"includeDeclaration":false}
+        }}),
+    )
+    .await;
+    let local_references = receive_response(&mut stdout, 3).await;
+    assert_eq!(local_references["result"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        local_references["result"][0]["range"],
+        json!(page_lines.span_to_range(radiant_compiler::Span::new(local_use, local_use + 4)))
+    );
+
+    let shared_reference = page.find("defs$Shared").unwrap() + "defs$".len();
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":4,"method":"textDocument/definition","params":{
+            "textDocument":{"uri":page_uri},
+            "position":page_lines.byte_to_position(shared_reference)
+        }}),
+    )
+    .await;
+    let definition = receive_response(&mut stdout, 4).await;
+    let shared_declaration = definitions.find("Shared").unwrap();
+    assert_eq!(definition["result"]["uri"], definitions_uri.as_str());
+    assert_eq!(
+        definition["result"]["range"],
+        json!(definitions_lines.span_to_range(radiant_compiler::Span::new(
+            shared_declaration,
+            shared_declaration + 6
+        )))
+    );
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":5,"method":"textDocument/references","params":{
+            "textDocument":{"uri":definitions_uri},
+            "position":definitions_lines.byte_to_position(shared_declaration),
+            "context":{"includeDeclaration":true}
+        }}),
+    )
+    .await;
+    let fragment_references = receive_response(&mut stdout, 5).await;
+    assert_eq!(fragment_references["result"].as_array().unwrap().len(), 3);
+    assert!(
+        fragment_references["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|location| {
+                location["uri"] == definitions_uri.as_str()
+                    && location["range"]["start"]
+                        == json!(
+                            definitions_lines
+                                .byte_to_position(definitions.rfind("Shared").unwrap())
+                        )
+            })
+    );
+
+    let note_reference = page.find("defs$Note").unwrap() + "defs$".len();
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":6,"method":"textDocument/references","params":{
+            "textDocument":{"uri":page_uri},
+            "position":page_lines.byte_to_position(note_reference),
+            "context":{"includeDeclaration":true}
+        }}),
+    )
+    .await;
+    let capture_references = receive_response(&mut stdout, 6).await;
+    assert_eq!(capture_references["result"].as_array().unwrap().len(), 2);
+
+    for (id, needle, expected_count) in [(7, "layout /}", 1), (8, "card /}", 2)] {
+        let at = page.find(needle).unwrap();
+        send(
+            &mut stdin,
+            json!({"jsonrpc":"2.0","id":id,"method":"textDocument/references","params":{
+                "textDocument":{"uri":page_uri},
+                "position":page_lines.byte_to_position(at),
+                "context":{"includeDeclaration":false}
+            }}),
+        )
+        .await;
+        assert_eq!(
+            receive_response(&mut stdout, id).await["result"]
+                .as_array()
+                .unwrap()
+                .len(),
+            expected_count
+        );
+    }
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":9,"method":"workspace/symbol","params":{"query":"shared"}}),
+    )
+    .await;
+    let workspace_symbols = receive_response(&mut stdout, 9).await;
+    assert_eq!(workspace_symbols["result"].as_array().unwrap().len(), 2);
+    assert!(
+        workspace_symbols["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|symbol| {
+                symbol["location"]["uri"] == definitions_uri.as_str()
+                    && symbol["location"]["range"]
+                        == json!(definitions_lines.span_to_range(radiant_compiler::Span::new(
+                            shared_declaration,
+                            shared_declaration + 6,
+                        )))
+            })
+    );
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":10,"method":"workspace/symbol","params":{"query":"stale"}}),
+    )
+    .await;
+    assert_eq!(receive_response(&mut stdout, 10).await["result"], json!([]));
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":11,"method":"workspace/symbol","params":{"query":"defs"}}),
+    )
+    .await;
+    let template_symbol = receive_response(&mut stdout, 11).await;
+    assert_eq!(template_symbol["result"][0]["name"], "defs");
+    assert_eq!(
+        template_symbol["result"][0]["location"]["range"],
+        json!(definitions_lines.span_to_range(radiant_compiler::Span::new(0, definitions.len())))
+    );
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":12,"method":"shutdown","params":null}),
+    )
+    .await;
+    assert_eq!(receive_response(&mut stdout, 12).await["id"], 12);
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    )
+    .await;
+    drop(stdin);
+    assert!(child.wait().await.unwrap().success());
+}
+
+#[tokio::test]
 async fn workspace_templates_register_watchers_refresh_and_return_protocol_shapes() {
     let first = tempdir().unwrap();
     let second = tempdir().unwrap();
@@ -402,7 +662,10 @@ async fn workspace_templates_register_watchers_refresh_and_return_protocol_shape
         json!({"jsonrpc":"2.0","id":21,"method":"textDocument/completion","params":{"textDocument":{"uri":added_document},"position":{"line":0,"character":added_source.len()}}}),
     )
     .await;
-    assert_eq!(receive(&mut stdout).await["result"][0]["label"], "dynamic");
+    assert_eq!(
+        receive_response(&mut stdout, 21).await["result"][0]["label"],
+        "dynamic"
+    );
 
     send(
         &mut stdin,

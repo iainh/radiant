@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use radiant_compiler::{Analysis, ArgumentValue, BUILT_IN_SECTIONS, Node, Section, Span};
+use radiant_compiler::{Analysis, Span};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Url};
 
 use crate::{
-    DocumentSnapshot, DocumentStore, semantic::opening_name_span, workspace::WorkspaceIndex,
+    DocumentSnapshot, DocumentStore,
+    semantic::{SemanticIndex, TemplateReference},
+    workspace::WorkspaceIndex,
 };
 
 const MISSING_TEMPLATE: &str = "E_TEMPLATE_NOT_FOUND";
@@ -16,13 +18,6 @@ struct CrossDiagnostic {
     span: Span,
     code: &'static str,
     message: String,
-}
-
-struct IncludeReference<'a> {
-    target: &'a str,
-    fragment: Option<&'a str>,
-    target_span: Span,
-    fragment_span: Option<Span>,
 }
 
 pub(crate) fn diagnostics(
@@ -85,134 +80,93 @@ fn cross_diagnostics(
     let graph = analyses
         .iter()
         .map(|(id, analysis)| {
-            let targets = include_references(&analysis.template.nodes, &analysis.template.source)
-                .into_iter()
-                .filter(|reference| analyses.contains_key(reference.target))
-                .map(|reference| reference.target.to_owned())
+            let semantic = SemanticIndex::new(&analysis.template.nodes, &analysis.template.source);
+            let targets = semantic
+                .template_references()
+                .iter()
+                .filter_map(|reference| match reference {
+                    TemplateReference::Include { target, .. }
+                        if !target.is_empty() && analyses.contains_key(target) =>
+                    {
+                        Some(target.clone())
+                    }
+                    _ => None,
+                })
                 .collect();
             (id.as_str(), targets)
         })
         .collect::<BTreeMap<_, Vec<_>>>();
     let mut result = Vec::new();
-    visit_sections(&analysis.template.nodes, &mut |section| {
-        if section.name == "include" {
-            let Some(reference) = include_reference(section, source) else {
-                return;
-            };
-            let Some(target) = analyses.get(reference.target) else {
-                result.push(CrossDiagnostic {
-                    span: reference.target_span,
-                    code: MISSING_TEMPLATE,
-                    message: format!("template `{}` was not found", reference.target),
-                });
-                return;
-            };
-            if let Some(fragment) = reference.fragment {
-                let fragments = target
-                    .template
-                    .fragments()
-                    .into_iter()
-                    .filter_map(|section| section.arguments.first()?.static_text())
-                    .collect::<BTreeSet<_>>();
-                if !fragments.contains(fragment) {
+    let semantic = SemanticIndex::new(&analysis.template.nodes, source);
+    for reference in semantic.template_references() {
+        match reference {
+            TemplateReference::Include {
+                target: referenced,
+                target_span,
+                fragment,
+            } => {
+                let target_id = if referenced.is_empty() {
+                    template_id
+                } else {
+                    referenced
+                };
+                let target = if referenced.is_empty() {
+                    Some(analysis)
+                } else {
+                    analyses.get(referenced).copied()
+                };
+                let Some(target) = target else {
                     result.push(CrossDiagnostic {
-                        span: reference.fragment_span.unwrap_or(reference.target_span),
-                        code: MISSING_FRAGMENT,
-                        message: format!(
-                            "fragment `{fragment}` was not found in template `{}`",
-                            reference.target
-                        ),
+                        span: *target_span,
+                        code: MISSING_TEMPLATE,
+                        message: format!("template `{referenced}` was not found"),
+                    });
+                    continue;
+                };
+                if let Some((fragment, fragment_span)) = fragment {
+                    let fragments = target
+                        .template
+                        .fragments()
+                        .into_iter()
+                        .filter_map(|section| section.arguments.first()?.static_text())
+                        .collect::<BTreeSet<_>>();
+                    if !fragments.contains(fragment.as_str()) {
+                        result.push(CrossDiagnostic {
+                            span: *fragment_span,
+                            code: MISSING_FRAGMENT,
+                            message: format!(
+                                "fragment `{fragment}` was not found in template `{}`",
+                                target_id
+                            ),
+                        });
+                    }
+                }
+                if !referenced.is_empty()
+                    && let Some(path) = path_to(&graph, referenced, template_id)
+                {
+                    let mut cycle = vec![template_id.to_owned()];
+                    cycle.extend(path);
+                    result.push(CrossDiagnostic {
+                        span: *target_span,
+                        code: INCLUDE_CYCLE,
+                        message: format!("static include cycle: {}", cycle.join(" -> ")),
                     });
                 }
             }
-            if let Some(path) = path_to(&graph, reference.target, template_id) {
-                let mut cycle = vec![template_id.to_owned()];
-                cycle.extend(path);
+            TemplateReference::Tag { target, span } if !analyses.contains_key(target) => {
                 result.push(CrossDiagnostic {
-                    span: reference.target_span,
-                    code: INCLUDE_CYCLE,
-                    message: format!("static include cycle: {}", cycle.join(" -> ")),
-                });
-            }
-        } else if !BUILT_IN_SECTIONS.contains(&section.name.as_str()) {
-            let id = format!("tags/{}", section.name);
-            if !analyses.contains_key(&id) {
-                result.push(CrossDiagnostic {
-                    span: opening_name_span(source, section.span, &section.name),
+                    span: *span,
                     code: MISSING_TAG,
-                    message: format!("user tag `{}` was not found", section.name),
+                    message: format!(
+                        "user tag `{}` was not found",
+                        target.strip_prefix("tags/").unwrap_or(target)
+                    ),
                 });
             }
+            TemplateReference::Tag { .. } => {}
         }
-    });
+    }
     result
-}
-
-fn include_references<'a>(nodes: &'a [Node], source: &'a str) -> Vec<IncludeReference<'a>> {
-    let mut references = Vec::new();
-    visit_sections(nodes, &mut |section| {
-        if section.name == "include"
-            && let Some(reference) = include_reference(section, source)
-        {
-            references.push(reference);
-        }
-    });
-    references
-}
-
-fn include_reference<'a>(section: &'a Section, source: &'a str) -> Option<IncludeReference<'a>> {
-    if section
-        .arguments
-        .iter()
-        .any(|argument| argument.name.as_deref() == Some("_id"))
-    {
-        return None;
-    }
-    let argument = section.arguments.first()?;
-    if argument.name.is_some() {
-        return None;
-    }
-    let value = match &argument.value {
-        ArgumentValue::String(value) | ArgumentValue::Raw(value) => value.as_str(),
-        ArgumentValue::Expression(_) => return None,
-    };
-    if value.starts_with("_id=") {
-        return None;
-    }
-    let raw = source.get(argument.span.start..argument.span.end)?;
-    let content_start = usize::from(
-        raw.as_bytes()
-            .first()
-            .is_some_and(|quote| matches!(quote, b'\'' | b'"')),
-    );
-    let (target, fragment) = value
-        .split_once('$')
-        .map_or((value, None), |(target, fragment)| (target, Some(fragment)));
-    let target_span = Span::new(
-        argument.span.start + content_start,
-        argument.span.start + content_start + target.len(),
-    );
-    let fragment_span = fragment.map(|fragment| {
-        let start = target_span.end + 1;
-        Span::new(start, start + fragment.len())
-    });
-    Some(IncludeReference {
-        target,
-        fragment,
-        target_span,
-        fragment_span,
-    })
-}
-
-fn visit_sections<'a>(nodes: &'a [Node], visitor: &mut impl FnMut(&'a Section)) {
-    for node in nodes {
-        if let Node::Section(section) = node {
-            visitor(section);
-            for block in &section.blocks {
-                visit_sections(&block.nodes, visitor);
-            }
-        }
-    }
 }
 
 fn path_to(
@@ -310,7 +264,7 @@ mod tests {
 
     #[test]
     fn ignores_dynamic_includes_and_accepts_existing_fragments() {
-        let source = "{#include _id=chosen /}{#include card$present /}{#card /}";
+        let source = "{#fragment local /}{#include $local /}{#include _id=chosen /}{#include card$present /}{#card /}";
         assert!(
             codes(
                 source,

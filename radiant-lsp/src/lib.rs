@@ -30,9 +30,10 @@ use tower_lsp::{
         DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolParams,
         DocumentSymbolResponse, FileEvent, FileSystemWatcher, GlobPattern, GotoDefinitionParams,
         GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability, InitializeParams,
-        InitializeResult, InitializedParams, MessageType, OneOf, Registration, ServerCapabilities,
-        ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
-        WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities,
+        InitializeResult, InitializedParams, MessageType, OneOf, ReferenceParams, Registration,
+        ServerCapabilities, ServerInfo, SymbolInformation, TextDocumentSyncCapability,
+        TextDocumentSyncKind, Url, WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities,
+        WorkspaceSymbolParams,
     },
 };
 
@@ -203,6 +204,8 @@ impl LanguageServer for Backend {
                 }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 workspace: Some(WorkspaceServerCapabilities {
                     workspace_folders: Some(WorkspaceFoldersServerCapabilities {
                         supported: Some(true),
@@ -344,8 +347,59 @@ impl LanguageServer for Backend {
                     &document.text_document.uri,
                     document.position,
                     &workspace,
+                    &documents,
                 )
             }))
+    }
+
+    async fn references(
+        &self,
+        params: ReferenceParams,
+    ) -> Result<Option<Vec<tower_lsp::lsp_types::Location>>> {
+        let documents = self
+            .state
+            .documents
+            .lock()
+            .expect("document store poisoned");
+        let workspace = self
+            .state
+            .workspace
+            .lock()
+            .expect("workspace index poisoned");
+        let document = &params.text_document_position;
+        Ok(documents
+            .get(&document.text_document.uri)
+            .and_then(|snapshot| {
+                navigation::references(
+                    snapshot,
+                    &document.text_document.uri,
+                    document.position,
+                    params.context.include_declaration,
+                    &workspace,
+                    &documents,
+                )
+            }))
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let documents = self
+            .state
+            .documents
+            .lock()
+            .expect("document store poisoned");
+        let workspace = self
+            .state
+            .workspace
+            .lock()
+            .expect("workspace index poisoned");
+        Ok(Some(symbols::workspace_symbols(
+            &params.query,
+            &workspace,
+            &documents,
+        )))
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
