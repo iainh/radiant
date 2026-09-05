@@ -22,6 +22,7 @@ Radiant brings the useful ideas from [Quarkus Qute](https://quarkus.io/guides/qu
 | `radiant-compiler` | Dependency-light parser and owned AST for runtime use and tooling |
 | `radiant-macros` | Compile-time template loading, dependency validation and derives |
 | `radiant-axum` | Request extraction, content negotiation, deadlines and responses |
+| `radiant-lsp` | Language server for diagnostics, completion and navigation |
 
 ## Quick start
 
@@ -155,6 +156,33 @@ Use `FileLoader` to load templates from disk on demand. `Engine::reload` and `En
 
 Enable the `serde` feature to convert dynamic data with `Value::from_serialize`. Serde isn't required for checked templates or the core value model.
 
+## Language server
+
+Build or install the stdio language server from this workspace:
+
+```console
+cargo install --path radiant-lsp
+```
+
+`radiant-lsp` provides live parser diagnostics, document symbols, built-in section and block completion, template ID and user-tag completion, hover documentation, and go-to-definition for local declarations, includes and user tags. It discovers templates below each workspace's `templates/` directory and refreshes them when the editor reports file changes.
+
+For Neovim 0.11 or newer, mark files below `templates/` as Radiant templates and enable the built-in LSP client:
+
+```lua
+vim.filetype.add({
+  pattern = { [".*/templates/.*%.html"] = "radiant" },
+})
+
+vim.lsp.config.radiant = {
+  cmd = { "radiant-lsp" },
+  filetypes = { "radiant" },
+  root_markers = { "Cargo.toml", ".git" },
+}
+vim.lsp.enable("radiant")
+```
+
+The server uses full-document synchronization. It understands declarations and lexical scope within templates, but does not yet resolve Rust types or provide member-field completion. Formatting, rename and code actions are also not implemented.
+
 ## Security model
 
 Rendering is strict by default: unresolved values are errors unless made safe with `??` or handled with `?:`. Template IDs can't be absolute or escape their configured root. Engines cap include depth and output size, and report structured errors with source spans and render stacks.
@@ -166,6 +194,14 @@ For templates written by end users, start from `Engine::builder().restricted()`.
 ```console
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+```
+
+The optional editor acceptance test requires Neovim 0.11 or newer and a built server binary:
+
+```console
+cargo build -p radiant-lsp
+RADIANT_LSP="$PWD/target/debug/radiant-lsp" \
+  nvim --clean --headless -l radiant-lsp/tests/neovim_smoke.lua
 ```
 
 The design rationale, including how Radiant maps Qute concepts onto Rust and Axum, is in [`docs/research`](docs/research/).
