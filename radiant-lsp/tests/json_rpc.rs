@@ -251,9 +251,12 @@ async fn stdio_server_publishes_updates_rejects_stale_versions_and_clears_on_clo
 async fn workspace_templates_register_watchers_refresh_and_return_protocol_shapes() {
     let first = tempdir().unwrap();
     let second = tempdir().unwrap();
+    let added = tempdir().unwrap();
     fs::create_dir_all(first.path().join("templates/layouts")).unwrap();
     fs::create_dir_all(first.path().join("templates/tags")).unwrap();
+    fs::create_dir_all(first.path().join("templates/.hidden")).unwrap();
     fs::create_dir_all(second.path().join("templates")).unwrap();
+    fs::create_dir_all(added.path().join("templates")).unwrap();
     let layout = first.path().join("templates/layouts/base.html");
     let tag = first.path().join("templates/tags/card.html");
     fs::write(
@@ -268,8 +271,12 @@ async fn workspace_templates_register_watchers_refresh_and_return_protocol_shape
     )
     .unwrap();
     fs::write(second.path().join("templates/isolated.html"), "other").unwrap();
+    fs::write(first.path().join("templates/.hidden/secret.html"), "hidden").unwrap();
+    fs::write(first.path().join("templates/backup.html~"), "backup").unwrap();
+    fs::write(added.path().join("templates/dynamic.html"), "dynamic").unwrap();
     let first_uri = tower_lsp::lsp_types::Url::from_file_path(first.path()).unwrap();
     let second_uri = tower_lsp::lsp_types::Url::from_file_path(second.path()).unwrap();
+    let added_uri = tower_lsp::lsp_types::Url::from_file_path(added.path()).unwrap();
     let document_uri =
         tower_lsp::lsp_types::Url::from_file_path(first.path().join("templates/page.html"))
             .unwrap();
@@ -303,7 +310,12 @@ async fn workspace_templates_register_watchers_refresh_and_return_protocol_shape
         }),
     )
     .await;
-    assert_eq!(receive(&mut stdout).await["id"], 1);
+    let initialized = receive(&mut stdout).await;
+    assert_eq!(initialized["id"], 1);
+    assert_eq!(
+        initialized["result"]["capabilities"]["workspace"]["workspaceFolders"],
+        json!({"supported":true,"changeNotifications":true})
+    );
     send(
         &mut stdin,
         json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
@@ -352,6 +364,79 @@ async fn workspace_templates_register_watchers_refresh_and_return_protocol_shape
     assert_eq!(labels, ["layouts/base"]);
     assert_eq!(initial["result"][0]["kind"], 17);
     assert!(!labels.contains(&"isolated"));
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"workspace/didChangeWorkspaceFolders","params":{"event":{
+            "added":[{"uri":added_uri,"name":"added"}],
+            "removed":[{"uri":second_uri,"name":"second"}]
+        }}}),
+    )
+    .await;
+    assert_eq!(
+        receive_diagnostics(&mut stdout, document_uri.as_str()).await["params"]["version"],
+        1
+    );
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":20,"method":"textDocument/completion","params":{"textDocument":{"uri":document_uri},"position":{"line":0,"character":incomplete.len()}}}),
+    )
+    .await;
+    assert_eq!(
+        receive(&mut stdout).await["result"][0]["label"],
+        "layouts/base"
+    );
+
+    let added_document =
+        tower_lsp::lsp_types::Url::from_file_path(added.path().join("templates/page.html"))
+            .unwrap();
+    let added_source = "{#include dyn";
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":added_document,"languageId":"radiant","version":1,"text":added_source}}}),
+    )
+    .await;
+    let _ = receive_diagnostics(&mut stdout, added_document.as_str()).await;
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":21,"method":"textDocument/completion","params":{"textDocument":{"uri":added_document},"position":{"line":0,"character":added_source.len()}}}),
+    )
+    .await;
+    assert_eq!(receive(&mut stdout).await["result"][0]["label"], "dynamic");
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"workspace/didChangeWorkspaceFolders","params":{"event":{
+            "added":[],
+            "removed":[{"uri":added_uri,"name":"added"}]
+        }}}),
+    )
+    .await;
+    for _ in 0..2 {
+        assert_eq!(
+            receive(&mut stdout).await["method"],
+            "textDocument/publishDiagnostics"
+        );
+    }
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":22,"method":"textDocument/completion","params":{"textDocument":{"uri":added_document},"position":{"line":0,"character":added_source.len()}}}),
+    )
+    .await;
+    assert_eq!(receive(&mut stdout).await["result"], json!([]));
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"textDocument/didClose","params":{"textDocument":{"uri":added_document}}}),
+    )
+    .await;
+    assert_eq!(
+        receive(&mut stdout).await["method"],
+        "textDocument/publishDiagnostics"
+    );
+    assert_eq!(
+        receive(&mut stdout).await["method"],
+        "textDocument/publishDiagnostics"
+    );
 
     for (id, source, expected) in [
         (8, "{#i", vec!["if", "insert", "include"]),
@@ -406,6 +491,18 @@ async fn workspace_templates_register_watchers_refresh_and_return_protocol_shape
         json!({"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{"changes":[{"uri":created_uri,"type":1}]}}),
     )
     .await;
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{"changes":[{"uri":created_uri,"type":2}]}}),
+    )
+    .await;
+    let hidden_created = first.path().join("templates/.ignored.html");
+    fs::write(&hidden_created, "ignored").unwrap();
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{"changes":[{"uri":tower_lsp::lsp_types::Url::from_file_path(hidden_created).unwrap(),"type":1}]}}),
+    )
+    .await;
     assert_eq!(
         receive_diagnostics(&mut stdout, document_uri.as_str()).await["params"]["version"],
         11
@@ -416,13 +513,16 @@ async fn workspace_templates_register_watchers_refresh_and_return_protocol_shape
     )
     .await;
     let refreshed = receive(&mut stdout).await;
-    assert!(
-        refreshed["result"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["label"] == "new")
-    );
+    let refreshed_labels = refreshed["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["label"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(refreshed_labels.contains(&"new"));
+    assert!(!refreshed_labels.contains(&".ignored"));
+    assert!(!refreshed_labels.contains(&".hidden/secret"));
+    assert!(!refreshed_labels.contains(&"backup"));
     fs::remove_file(&created).unwrap();
     send(
         &mut stdin,

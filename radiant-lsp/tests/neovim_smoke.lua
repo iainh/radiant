@@ -122,6 +122,10 @@ client:notify("workspace/didChangeWatchedFiles", {
   changes = {
     { uri = vim.uri_from_fname(templates .. "/missing.html"), type = 1 },
     { uri = vim.uri_from_fname(templates .. "/tags/lost.html"), type = 1 },
+  },
+})
+client:notify("workspace/didChangeWatchedFiles", {
+  changes = {
     { uri = vim.uri_from_fname(templates .. "/fragments.html"), type = 2 },
     { uri = vim.uri_from_fname(templates .. "/cycle.html"), type = 2 },
   },
@@ -229,9 +233,49 @@ local layout_blocks = completion_items({ line = 0, character = 26 })
 assert(#layout_blocks == 1 and layout_blocks[1].label == "body",
   "included layout block completion was missing: " .. vim.inspect(layout_blocks))
 
+local added_root = vim.fn.tempname()
+local added_templates = added_root .. "/templates"
+vim.fn.mkdir(added_templates, "p")
+vim.fn.writefile({ "dynamic" }, added_templates .. "/dynamic.html")
+local added_page = added_templates .. "/page.html"
+vim.fn.writefile({ "{#include dyn" }, added_page)
+client:notify("workspace/didChangeWorkspaceFolders", {
+  event = {
+    added = { { uri = vim.uri_from_fname(added_root), name = "added" } },
+    removed = {},
+  },
+})
+local added_buffer = vim.fn.bufadd(added_page)
+vim.fn.bufload(added_buffer)
+vim.bo[added_buffer].filetype = "radiant"
+assert(vim.lsp.buf_attach_client(added_buffer, client_id), "could not attach added workspace buffer")
+assert(vim.wait(5000, function()
+  local response = client:request_sync("textDocument/completion", {
+    textDocument = { uri = vim.uri_from_bufnr(added_buffer) },
+    position = { line = 0, character = 13 },
+  }, 1000, added_buffer)
+  return response and not response.err and response.result and response.result[1]
+    and response.result[1].label == "dynamic"
+end, 20), "added workspace folder was not indexed")
+
+client:notify("workspace/didChangeWorkspaceFolders", {
+  event = {
+    added = {},
+    removed = { { uri = vim.uri_from_fname(added_root), name = "added" } },
+  },
+})
+assert(vim.wait(5000, function()
+  local response = client:request_sync("textDocument/completion", {
+    textDocument = { uri = vim.uri_from_bufnr(added_buffer) },
+    position = { line = 0, character = 13 },
+  }, 1000, added_buffer)
+  return response and not response.err and response.result and #response.result == 0
+end, 20), "removed workspace folder remained indexed or its open document stopped serving requests")
+
 client:stop()
 assert(vim.wait(5000, function()
   return client:is_stopped()
 end, 20), "radiant-lsp did not stop cleanly")
 vim.fn.delete(root, "rf")
-print("radiant Neovim 0.11.4 acceptance: compiled Tree-sitter parser and HTML/Radiant captures; LSP diagnostics/watchers, symbols, hover, definitions, typed completion order, negotiated snippets, fragments/captures and layout blocks passed")
+vim.fn.delete(added_root, "rf")
+print("radiant Neovim 0.11.4 acceptance: compiled Tree-sitter parser and HTML/Radiant captures; dynamic workspace add/remove with open-document service; debounced watched-file bursts and diagnostic clearing; symbols, hover, definitions, typed completion order, negotiated snippets, fragments/captures and layout blocks passed")
