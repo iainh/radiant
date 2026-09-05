@@ -8,6 +8,8 @@ vim.fn.mkdir(templates .. "/layouts", "p")
 vim.fn.mkdir(templates .. "/tags", "p")
 vim.fn.writefile({ "<main>{#insert body /}</main>" }, templates .. "/layouts/base.html")
 vim.fn.writefile({ "<article>{#nested-content /}</article>" }, templates .. "/tags/card.html")
+vim.fn.writefile({ "{#fragment present /}" }, templates .. "/fragments.html")
+vim.fn.writefile({ "{#include page /}" }, templates .. "/cycle.html")
 
 local page = templates .. "/page.html"
 local initial = {
@@ -16,6 +18,11 @@ local initial = {
   "{#card /}",
   "{#if name}{name}{/if}",
   "{broken +}",
+  "{#include missing /}",
+  "{#lost /}",
+  "{#include fragments$absent /}",
+  "{#include cycle /}",
+  "{#include _id=chosen /}",
 }
 vim.fn.writefile(initial, page)
 vim.cmd.edit(vim.fn.fnameescape(page))
@@ -37,8 +44,38 @@ assert(vim.wait(5000, function()
 end, 20), "Neovim did not receive Radiant diagnostics")
 
 local diagnostics = vim.diagnostic.get(buffer)
-assert(diagnostics[1].source == "radiant", "diagnostic source was not Radiant")
-assert(diagnostics[1].code == "E_EXPR_EXPECTED", "unexpected diagnostic code")
+local diagnostic_codes = {}
+for _, diagnostic in ipairs(diagnostics) do
+  assert(diagnostic.source == "radiant", "diagnostic source was not Radiant")
+  diagnostic_codes[diagnostic.code] = true
+end
+for _, code in ipairs({
+  "E_EXPR_EXPECTED",
+  "E_TEMPLATE_NOT_FOUND",
+  "E_TAG_NOT_FOUND",
+  "E_FRAGMENT_NOT_FOUND",
+  "E_INCLUDE_CYCLE",
+}) do
+  assert(diagnostic_codes[code], "missing representative cross-template diagnostic " .. code)
+end
+
+vim.fn.mkdir(templates .. "/tags", "p")
+vim.fn.writefile({ "created" }, templates .. "/missing.html")
+vim.fn.writefile({ "created" }, templates .. "/tags/lost.html")
+vim.fn.writefile({ "{#fragment absent /}" }, templates .. "/fragments.html")
+vim.fn.writefile({ "cycle fixed" }, templates .. "/cycle.html")
+client:notify("workspace/didChangeWatchedFiles", {
+  changes = {
+    { uri = vim.uri_from_fname(templates .. "/missing.html"), type = 1 },
+    { uri = vim.uri_from_fname(templates .. "/tags/lost.html"), type = 1 },
+    { uri = vim.uri_from_fname(templates .. "/fragments.html"), type = 2 },
+    { uri = vim.uri_from_fname(templates .. "/cycle.html"), type = 2 },
+  },
+})
+assert(vim.wait(5000, function()
+  local current = vim.diagnostic.get(buffer)
+  return #current == 1 and current[1].code == "E_EXPR_EXPECTED"
+end, 20), "creating and fixing referenced templates did not clear cross-template diagnostics")
 
 local function text_document()
   return { uri = vim.uri_from_bufnr(buffer) }
@@ -115,4 +152,4 @@ assert(vim.wait(5000, function()
   return client:is_stopped()
 end, 20), "radiant-lsp did not stop cleanly")
 vim.fn.delete(root, "rf")
-print("radiant-lsp Neovim acceptance: diagnostics, symbols, completion, hover and definitions passed")
+print("radiant-lsp Neovim acceptance: parser and cross-template diagnostics, watcher clearing, symbols, completion, hover and definitions passed")

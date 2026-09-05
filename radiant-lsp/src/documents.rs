@@ -61,6 +61,10 @@ impl DocumentStore {
     pub fn get(&self, uri: &Url) -> Option<&DocumentSnapshot> {
         self.documents.get(uri)
     }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Url, &DocumentSnapshot)> {
+        self.documents.iter()
+    }
 }
 
 fn template_root(uri: &Url) -> Option<PathBuf> {

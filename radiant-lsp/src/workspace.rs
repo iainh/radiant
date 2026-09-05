@@ -6,13 +6,19 @@ use std::{
 
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
-use radiant_compiler::BUILT_IN_SECTIONS;
+use radiant_compiler::{Analysis, BUILT_IN_SECTIONS, analyze};
+
+#[derive(Debug)]
+struct IndexedTemplate {
+    path: PathBuf,
+    analysis: Option<Analysis>,
+}
 
 #[derive(Debug)]
 struct TemplateRoot {
     workspace: PathBuf,
     templates: PathBuf,
-    files: BTreeMap<String, PathBuf>,
+    files: BTreeMap<String, IndexedTemplate>,
 }
 
 impl TemplateRoot {
@@ -70,7 +76,7 @@ impl WorkspaceIndex {
         if !safe_id(id) {
             return None;
         }
-        let path = self.root_for_document(document)?.files.get(id)?;
+        let path = &self.root_for_document(document)?.files.get(id)?.path;
         Some(Location::new(
             Url::from_file_path(path).ok()?,
             Range::new(Position::new(0, 0), Position::new(0, 0)),
@@ -89,6 +95,34 @@ impl WorkspaceIndex {
         }
     }
 
+    pub(crate) fn template_id(&self, document: &Url) -> Option<String> {
+        let path = document.to_file_path().ok()?;
+        let root = self.root_for_document(document)?;
+        template_id(&root.templates, &path)
+    }
+
+    pub(crate) fn analyses(&self, document: &Url) -> Vec<(&str, &Analysis)> {
+        self.root_for_document(document)
+            .map(|root| {
+                root.files
+                    .iter()
+                    .filter_map(|(id, template)| {
+                        template
+                            .analysis
+                            .as_ref()
+                            .map(|analysis| (id.as_str(), analysis))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn shares_root(&self, left: &Url, right: &Url) -> bool {
+        self.root_for_document(left)
+            .zip(self.root_for_document(right))
+            .is_some_and(|(left, right)| left.templates == right.templates)
+    }
+
     fn root_for_document(&self, document: &Url) -> Option<&TemplateRoot> {
         let path = document.to_file_path().ok()?;
         self.roots
@@ -104,7 +138,7 @@ impl WorkspaceIndex {
     }
 }
 
-fn discover(root: &Path) -> BTreeMap<String, PathBuf> {
+fn discover(root: &Path) -> BTreeMap<String, IndexedTemplate> {
     fn visit(directory: &Path, files: &mut Vec<PathBuf>) {
         let Ok(entries) = fs::read_dir(directory) else {
             return;
@@ -127,15 +161,23 @@ fn discover(root: &Path) -> BTreeMap<String, PathBuf> {
     paths
         .into_iter()
         .filter_map(|path| {
-            let relative = path.strip_prefix(root).ok()?.with_extension("");
-            let id = relative
-                .components()
-                .map(|component| component.as_os_str().to_str())
-                .collect::<Option<Vec<_>>>()?
-                .join("/");
-            Some((id, path))
+            let id = template_id(root, &path)?;
+            let analysis = fs::read_to_string(&path)
+                .ok()
+                .map(|source| analyze(&id, source));
+            Some((id, IndexedTemplate { path, analysis }))
         })
         .collect()
+}
+
+fn template_id(root: &Path, path: &Path) -> Option<String> {
+    path.strip_prefix(root)
+        .ok()?
+        .with_extension("")
+        .components()
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()
+        .map(|components| components.join("/"))
 }
 
 fn safe_id(id: &str) -> bool {

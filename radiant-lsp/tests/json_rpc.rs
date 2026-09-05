@@ -39,6 +39,16 @@ async fn receive(stdout: &mut BufReader<ChildStdout>) -> Value {
     .expect("timed out waiting for server message")
 }
 
+async fn receive_diagnostics(stdout: &mut BufReader<ChildStdout>, uri: &str) -> Value {
+    loop {
+        let message = receive(stdout).await;
+        if message["method"] == "textDocument/publishDiagnostics" && message["params"]["uri"] == uri
+        {
+            return message;
+        }
+    }
+}
+
 #[tokio::test]
 async fn stdio_server_publishes_updates_rejects_stale_versions_and_clears_on_close() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_radiant-lsp"))
@@ -311,6 +321,10 @@ async fn workspace_templates_register_watchers_refresh_and_return_protocol_shape
         json!({"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{"changes":[{"uri":created_uri,"type":1}]}}),
     )
     .await;
+    assert_eq!(
+        receive_diagnostics(&mut stdout, document_uri.as_str()).await["params"]["version"],
+        1
+    );
     send(
         &mut stdin,
         json!({"jsonrpc":"2.0","id":3,"method":"textDocument/completion","params":{"textDocument":{"uri":document_uri},"position":{"line":0,"character":incomplete.len()}}}),
@@ -330,6 +344,10 @@ async fn workspace_templates_register_watchers_refresh_and_return_protocol_shape
         json!({"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{"changes":[{"uri":created_uri,"type":3}]}}),
     )
     .await;
+    assert_eq!(
+        receive_diagnostics(&mut stdout, document_uri.as_str()).await["params"]["version"],
+        1
+    );
 
     let references = "{#include layouts/base /}{#card /}";
     send(
@@ -436,6 +454,165 @@ async fn root_uri_is_used_when_workspace_folders_are_absent() {
     )
     .await;
     assert_eq!(receive(&mut stdout).await["id"], 3);
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    )
+    .await;
+    drop(stdin);
+    assert!(child.wait().await.unwrap().success());
+}
+
+#[tokio::test]
+async fn cross_template_diagnostics_use_open_overlays_and_refresh_watched_files() {
+    let workspace = tempdir().unwrap();
+    let templates = workspace.path().join("templates");
+    fs::create_dir_all(&templates).unwrap();
+    fs::write(templates.join("card.html"), "{#fragment present /}").unwrap();
+    fs::write(templates.join("middle.html"), "{#include page /}").unwrap();
+    let root_uri = tower_lsp::lsp_types::Url::from_file_path(workspace.path()).unwrap();
+    let page = templates.join("page.html");
+    let page_uri = tower_lsp::lsp_types::Url::from_file_path(&page).unwrap();
+    let page_uri_text = page_uri.as_str();
+    let source = concat!(
+        "😀 {#include 'missing' /}\n",
+        "{#lost /}\n",
+        "{#include card$absent /}\n",
+        "{#include _id=chosen /}\n",
+        "{#include middle /}\n",
+        "{broken +}"
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_radiant-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":root_uri,"capabilities":{}}}),
+    )
+    .await;
+    assert_eq!(receive(&mut stdout).await["id"], 1);
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":page_uri,"languageId":"radiant","version":1,"text":source}}}),
+    )
+    .await;
+    let initial = receive_diagnostics(&mut stdout, page_uri_text).await;
+    let diagnostics = initial["params"]["diagnostics"].as_array().unwrap();
+    let codes = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic["code"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        codes,
+        [
+            "E_EXPR_EXPECTED",
+            "E_TEMPLATE_NOT_FOUND",
+            "E_TAG_NOT_FOUND",
+            "E_FRAGMENT_NOT_FOUND",
+            "E_INCLUDE_CYCLE"
+        ]
+    );
+    assert_eq!(
+        diagnostics[1]["range"],
+        json!({"start":{"line":0,"character":14},"end":{"line":0,"character":21}})
+    );
+    assert_eq!(
+        diagnostics[2]["range"],
+        json!({"start":{"line":1,"character":2},"end":{"line":1,"character":6}})
+    );
+    assert_eq!(
+        diagnostics[3]["range"],
+        json!({"start":{"line":2,"character":15},"end":{"line":2,"character":21}})
+    );
+    assert_eq!(
+        diagnostics[4]["message"],
+        "static include cycle: page -> middle -> page"
+    );
+
+    let missing = templates.join("missing.html");
+    let tag = templates.join("tags/lost.html");
+    fs::create_dir_all(tag.parent().unwrap()).unwrap();
+    fs::write(&missing, "found").unwrap();
+    fs::write(&tag, "found").unwrap();
+    fs::write(templates.join("card.html"), "{#fragment absent /}").unwrap();
+    fs::write(templates.join("middle.html"), "no cycle").unwrap();
+    let changes = [
+        &missing,
+        &tag,
+        &templates.join("card.html"),
+        &templates.join("middle.html"),
+    ]
+    .into_iter()
+    .map(|path| {
+        json!({
+            "uri":tower_lsp::lsp_types::Url::from_file_path(path).unwrap(),
+            "type":2
+        })
+    })
+    .collect::<Vec<_>>();
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{"changes":changes}}),
+    )
+    .await;
+    let refreshed = receive_diagnostics(&mut stdout, page_uri_text).await;
+    assert_eq!(
+        refreshed["params"]["diagnostics"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        refreshed["params"]["diagnostics"][0]["code"],
+        "E_EXPR_EXPECTED"
+    );
+
+    let fragment_source = "{#include card$future /}";
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":page_uri,"version":2},"contentChanges":[{"text":fragment_source}]}}),
+    )
+    .await;
+    assert_eq!(
+        receive_diagnostics(&mut stdout, page_uri_text).await["params"]["diagnostics"][0]["code"],
+        "E_FRAGMENT_NOT_FOUND"
+    );
+
+    let card_uri = tower_lsp::lsp_types::Url::from_file_path(templates.join("card.html")).unwrap();
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":card_uri,"languageId":"radiant","version":1,"text":"{#fragment future /}"}}}),
+    )
+    .await;
+    assert_eq!(
+        receive_diagnostics(&mut stdout, page_uri_text).await["params"]["diagnostics"],
+        json!([])
+    );
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":card_uri,"version":2},"contentChanges":[{"text":"no fragments"}]}}),
+    )
+    .await;
+    assert_eq!(
+        receive_diagnostics(&mut stdout, page_uri_text).await["params"]["diagnostics"][0]["code"],
+        "E_FRAGMENT_NOT_FOUND"
+    );
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown","params":null}),
+    )
+    .await;
+    loop {
+        let message = receive(&mut stdout).await;
+        if message["id"] == 2 {
+            break;
+        }
+    }
     send(
         &mut stdin,
         json!({"jsonrpc":"2.0","method":"exit","params":null}),

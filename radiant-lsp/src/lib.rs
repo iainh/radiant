@@ -1,4 +1,5 @@
 mod completion;
+mod diagnostics;
 mod documents;
 mod line_index;
 mod navigation;
@@ -10,19 +11,18 @@ use std::sync::Mutex;
 
 pub use documents::{DocumentSnapshot, DocumentStore};
 pub use line_index::LineIndex;
-use radiant_compiler::Diagnostic as CompilerDiagnostic;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tower_lsp::{
     Client, LanguageServer, LspService, Server,
     jsonrpc::Result,
     lsp_types::{
-        CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
+        CompletionOptions, CompletionParams, CompletionResponse, Diagnostic,
         DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
         DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
         DidOpenTextDocumentParams, DocumentSymbolParams, DocumentSymbolResponse, FileSystemWatcher,
         GlobPattern, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
         HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams,
-        MessageType, NumberOrString, OneOf, Registration, ServerCapabilities, ServerInfo,
+        MessageType, OneOf, Registration, ServerCapabilities, ServerInfo,
         TextDocumentSyncCapability, TextDocumentSyncKind, Url,
     },
 };
@@ -52,6 +52,27 @@ impl Backend {
         self.client
             .publish_diagnostics(uri, diagnostics, version)
             .await;
+    }
+
+    fn open_diagnostics(&self) -> Vec<(Url, i32, Vec<Diagnostic>)> {
+        let documents = self.documents.lock().expect("document store poisoned");
+        let workspace = self.workspace.lock().expect("workspace index poisoned");
+        documents
+            .iter()
+            .map(|(uri, snapshot)| {
+                (
+                    uri.clone(),
+                    snapshot.version,
+                    diagnostics::diagnostics(uri, snapshot, &documents, &workspace),
+                )
+            })
+            .collect()
+    }
+
+    async fn publish_open_diagnostics(&self) {
+        for (uri, version, diagnostics) in self.open_diagnostics() {
+            self.publish(uri, Some(version), diagnostics).await;
+        }
     }
 }
 
@@ -196,17 +217,16 @@ impl LanguageServer for Backend {
             .lock()
             .expect("workspace index poisoned")
             .refresh_affected(params.changes.into_iter().map(|change| change.uri));
+        self.publish_open_diagnostics().await;
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let document = params.text_document;
-        let diagnostics = {
-            let mut documents = self.documents.lock().expect("document store poisoned");
-            let snapshot = documents.open(document.uri.clone(), document.version, document.text);
-            lsp_diagnostics(snapshot)
-        };
-        self.publish(document.uri, Some(document.version), diagnostics)
-            .await;
+        self.documents
+            .lock()
+            .expect("document store poisoned")
+            .open(document.uri, document.version, document.text);
+        self.publish_open_diagnostics().await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -218,15 +238,14 @@ impl LanguageServer for Backend {
         else {
             return;
         };
-        let diagnostics = {
+        let changed = {
             let mut documents = self.documents.lock().expect("document store poisoned");
             documents
                 .change(&document.uri, document.version, text)
-                .map(lsp_diagnostics)
+                .is_some()
         };
-        if let Some(diagnostics) = diagnostics {
-            self.publish(document.uri, Some(document.version), diagnostics)
-                .await;
+        if changed {
+            self.publish_open_diagnostics().await;
         }
     }
 
@@ -237,26 +256,7 @@ impl LanguageServer for Backend {
             .expect("document store poisoned")
             .close(&uri);
         self.publish(uri, None, Vec::new()).await;
-    }
-}
-
-fn lsp_diagnostics(snapshot: &DocumentSnapshot) -> Vec<Diagnostic> {
-    snapshot
-        .analysis
-        .diagnostics
-        .iter()
-        .map(|diagnostic| map_diagnostic(diagnostic, &snapshot.line_index))
-        .collect()
-}
-
-fn map_diagnostic(diagnostic: &CompilerDiagnostic, lines: &LineIndex) -> Diagnostic {
-    Diagnostic {
-        range: lines.span_to_range(diagnostic.span),
-        severity: Some(DiagnosticSeverity::ERROR),
-        code: Some(NumberOrString::String(diagnostic.code.into())),
-        source: Some("radiant".into()),
-        message: diagnostic.message.clone(),
-        ..Diagnostic::default()
+        self.publish_open_diagnostics().await;
     }
 }
 
@@ -268,29 +268,4 @@ where
 {
     let (service, socket) = LspService::new(Backend::new);
     Server::new(input, output, socket).serve(service).await;
-}
-
-#[cfg(test)]
-mod tests {
-    use radiant_compiler::analyze;
-    use tower_lsp::lsp_types::{DiagnosticSeverity, NumberOrString, Position};
-
-    use super::{LineIndex, map_diagnostic};
-
-    #[test]
-    fn maps_all_compiler_diagnostic_fields_and_utf16_range() {
-        let source = "😀 {broken +}";
-        let compiler = analyze("unicode", source).diagnostics.remove(0);
-        let diagnostic = map_diagnostic(&compiler, &LineIndex::new(source));
-
-        assert_eq!(
-            diagnostic.code,
-            Some(NumberOrString::String(compiler.code.into()))
-        );
-        assert_eq!(diagnostic.message, compiler.message);
-        assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::ERROR));
-        assert_eq!(diagnostic.source.as_deref(), Some("radiant"));
-        assert_eq!(diagnostic.range.start, Position::new(0, 12));
-        assert_eq!(diagnostic.range.end, Position::new(0, 12));
-    }
 }
