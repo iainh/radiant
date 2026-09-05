@@ -1,6 +1,7 @@
-use std::{process::Stdio, time::Duration};
+use std::{fs, process::Stdio, time::Duration};
 
 use serde_json::{Value, json};
+use tempfile::tempdir;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{ChildStdin, ChildStdout, Command},
@@ -199,6 +200,242 @@ async fn stdio_server_publishes_updates_rejects_stale_versions_and_clears_on_clo
     )
     .await;
     assert_eq!(receive(&mut stdout).await["id"], 2);
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    )
+    .await;
+    drop(stdin);
+    assert!(child.wait().await.unwrap().success());
+}
+
+#[tokio::test]
+async fn workspace_templates_register_watchers_refresh_and_return_protocol_shapes() {
+    let first = tempdir().unwrap();
+    let second = tempdir().unwrap();
+    fs::create_dir_all(first.path().join("templates/layouts")).unwrap();
+    fs::create_dir_all(first.path().join("templates/tags")).unwrap();
+    fs::create_dir_all(second.path().join("templates")).unwrap();
+    let layout = first.path().join("templates/layouts/base.html");
+    let tag = first.path().join("templates/tags/card.html");
+    fs::write(&layout, "layout").unwrap();
+    fs::write(&tag, "tag").unwrap();
+    fs::write(second.path().join("templates/isolated.html"), "other").unwrap();
+    let first_uri = tower_lsp::lsp_types::Url::from_file_path(first.path()).unwrap();
+    let second_uri = tower_lsp::lsp_types::Url::from_file_path(second.path()).unwrap();
+    let document_uri =
+        tower_lsp::lsp_types::Url::from_file_path(first.path().join("templates/page.html"))
+            .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_radiant-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        json!({
+            "jsonrpc":"2.0",
+            "id":1,
+            "method":"initialize",
+            "params":{
+                "rootUri":"file:///ignored-fallback",
+                "workspaceFolders":[
+                    {"uri":first_uri,"name":"first"},
+                    {"uri":second_uri,"name":"second"}
+                ],
+                "capabilities":{"workspace":{"didChangeWatchedFiles":{"dynamicRegistration":true}}}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(receive(&mut stdout).await["id"], 1);
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    let registration = receive(&mut stdout).await;
+    assert_eq!(registration["method"], "client/registerCapability");
+    assert_eq!(
+        registration["params"]["registrations"][0]["method"],
+        "workspace/didChangeWatchedFiles"
+    );
+    assert_eq!(
+        registration["params"]["registrations"][0]["registerOptions"]["watchers"][0]["globPattern"],
+        "**/templates/**"
+    );
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":registration["id"],"result":null}),
+    )
+    .await;
+    assert_eq!(receive(&mut stdout).await["method"], "window/logMessage");
+
+    let incomplete = "{#include lay";
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":document_uri,"languageId":"radiant","version":1,"text":incomplete}}}),
+    )
+    .await;
+    assert_eq!(
+        receive(&mut stdout).await["method"],
+        "textDocument/publishDiagnostics"
+    );
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":2,"method":"textDocument/completion","params":{"textDocument":{"uri":document_uri},"position":{"line":0,"character":incomplete.len()}}}),
+    )
+    .await;
+    let initial = receive(&mut stdout).await;
+    assert_eq!(initial["id"], 2);
+    let labels = initial["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["label"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(labels, ["layouts/base", "tags/card"]);
+    assert_eq!(initial["result"][0]["kind"], 17);
+    assert!(!labels.contains(&"isolated"));
+
+    let created = first.path().join("templates/new.txt");
+    fs::write(&created, "new").unwrap();
+    let created_uri = tower_lsp::lsp_types::Url::from_file_path(&created).unwrap();
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{"changes":[{"uri":created_uri,"type":1}]}}),
+    )
+    .await;
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":3,"method":"textDocument/completion","params":{"textDocument":{"uri":document_uri},"position":{"line":0,"character":incomplete.len()}}}),
+    )
+    .await;
+    let refreshed = receive(&mut stdout).await;
+    assert!(
+        refreshed["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "new")
+    );
+    fs::remove_file(&created).unwrap();
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{"changes":[{"uri":created_uri,"type":3}]}}),
+    )
+    .await;
+
+    let references = "{#include layouts/base /}{#card /}";
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":document_uri,"version":2},"contentChanges":[{"text":references}]}}),
+    )
+    .await;
+    assert_eq!(receive(&mut stdout).await["params"]["version"], 2);
+    for (id, character, target) in [
+        (4, references.find("layouts/base").unwrap(), &layout),
+        (5, references.find("card").unwrap(), &tag),
+    ] {
+        send(
+            &mut stdin,
+            json!({"jsonrpc":"2.0","id":id,"method":"textDocument/definition","params":{"textDocument":{"uri":document_uri},"position":{"line":0,"character":character}}}),
+        )
+        .await;
+        let definition = receive(&mut stdout).await;
+        assert_eq!(definition["id"], id);
+        assert_eq!(
+            definition["result"]["uri"],
+            json!(tower_lsp::lsp_types::Url::from_file_path(target).unwrap())
+        );
+        assert_eq!(
+            definition["result"]["range"],
+            json!({"start":{"line":0,"character":0},"end":{"line":0,"character":0}})
+        );
+    }
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":6,"method":"textDocument/completion","params":{"textDocument":{"uri":document_uri},"position":{"line":0,"character":incomplete.len()}}}),
+    )
+    .await;
+    assert!(
+        receive(&mut stdout).await["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["label"] != "new")
+    );
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":7,"method":"shutdown","params":null}),
+    )
+    .await;
+    assert_eq!(receive(&mut stdout).await["id"], 7);
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    )
+    .await;
+    drop(stdin);
+    assert!(child.wait().await.unwrap().success());
+}
+
+#[tokio::test]
+async fn root_uri_is_used_when_workspace_folders_are_absent() {
+    let workspace = tempdir().unwrap();
+    fs::create_dir_all(workspace.path().join("templates")).unwrap();
+    fs::write(workspace.path().join("templates/fallback.html"), "fallback").unwrap();
+    let root_uri = tower_lsp::lsp_types::Url::from_file_path(workspace.path()).unwrap();
+    let document_uri =
+        tower_lsp::lsp_types::Url::from_file_path(workspace.path().join("templates/page.html"))
+            .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_radiant-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":root_uri,"capabilities":{}}}),
+    )
+    .await;
+    assert_eq!(receive(&mut stdout).await["id"], 1);
+    let source = "{#include fall";
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":document_uri,"languageId":"radiant","version":1,"text":source}}}),
+    )
+    .await;
+    assert_eq!(
+        receive(&mut stdout).await["method"],
+        "textDocument/publishDiagnostics"
+    );
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":2,"method":"textDocument/completion","params":{"textDocument":{"uri":document_uri},"position":{"line":0,"character":source.len()}}}),
+    )
+    .await;
+    let completion = receive(&mut stdout).await;
+    assert_eq!(completion["id"], 2);
+    assert_eq!(completion["result"][0]["label"], "fallback");
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":3,"method":"shutdown","params":null}),
+    )
+    .await;
+    assert_eq!(receive(&mut stdout).await["id"], 3);
     send(
         &mut stdin,
         json!({"jsonrpc":"2.0","method":"exit","params":null}),

@@ -4,6 +4,7 @@ mod line_index;
 mod navigation;
 mod semantic;
 mod symbols;
+mod workspace;
 
 use std::sync::Mutex;
 
@@ -16,18 +17,24 @@ use tower_lsp::{
     jsonrpc::Result,
     lsp_types::{
         CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
-        DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-        DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
-        Hover, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-        InitializedParams, MessageType, NumberOrString, OneOf, ServerCapabilities, ServerInfo,
+        DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+        DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
+        DidOpenTextDocumentParams, DocumentSymbolParams, DocumentSymbolResponse, FileSystemWatcher,
+        GlobPattern, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
+        HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams,
+        MessageType, NumberOrString, OneOf, Registration, ServerCapabilities, ServerInfo,
         TextDocumentSyncCapability, TextDocumentSyncKind, Url,
     },
 };
+
+use workspace::WorkspaceIndex;
 
 /// Radiant language-server state and protocol handlers.
 pub struct Backend {
     client: Client,
     documents: Mutex<DocumentStore>,
+    workspace: Mutex<WorkspaceIndex>,
+    register_file_watcher: Mutex<bool>,
 }
 
 impl Backend {
@@ -36,6 +43,8 @@ impl Backend {
         Self {
             client,
             documents: Mutex::new(DocumentStore::default()),
+            workspace: Mutex::new(WorkspaceIndex::default()),
+            register_file_watcher: Mutex::new(false),
         }
     }
 
@@ -48,7 +57,28 @@ impl Backend {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        let dynamic_watching = params
+            .capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.did_change_watched_files.as_ref())
+            .and_then(|watching| watching.dynamic_registration)
+            .unwrap_or(false);
+        *self
+            .register_file_watcher
+            .lock()
+            .expect("file watcher state poisoned") = dynamic_watching;
+        let roots: Vec<_> = params
+            .workspace_folders
+            .filter(|folders| !folders.is_empty())
+            .map(|folders| folders.into_iter().map(|folder| folder.uri).collect())
+            .unwrap_or_else(|| params.root_uri.into_iter().collect());
+        self.workspace
+            .lock()
+            .expect("workspace index poisoned")
+            .set_roots(roots);
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -71,6 +101,33 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
+        let register = *self
+            .register_file_watcher
+            .lock()
+            .expect("file watcher state poisoned");
+        if register {
+            let options = DidChangeWatchedFilesRegistrationOptions {
+                watchers: vec![FileSystemWatcher {
+                    glob_pattern: GlobPattern::String("**/templates/**".into()),
+                    kind: None,
+                }],
+            };
+            let registration = Registration {
+                id: "radiant-template-files".into(),
+                method: "workspace/didChangeWatchedFiles".into(),
+                register_options: Some(
+                    serde_json::to_value(options).expect("watch options serialize"),
+                ),
+            };
+            if let Err(error) = self.client.register_capability(vec![registration]).await {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("failed to register template file watcher: {error}"),
+                    )
+                    .await;
+            }
+        }
         self.client
             .log_message(MessageType::INFO, "Radiant language server initialized")
             .await;
@@ -92,14 +149,18 @@ impl LanguageServer for Backend {
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let documents = self.documents.lock().expect("document store poisoned");
-        Ok(documents
-            .get(&params.text_document_position.text_document.uri)
-            .map(|snapshot| {
-                CompletionResponse::Array(completion::completions(
-                    snapshot,
-                    params.text_document_position.position,
-                ))
-            }))
+        let workspace = self.workspace.lock().expect("workspace index poisoned");
+        let uri = &params.text_document_position.text_document.uri;
+        let template_ids = workspace.template_ids(uri);
+        let tag_names = workspace.tag_names(uri);
+        Ok(documents.get(uri).map(|snapshot| {
+            CompletionResponse::Array(completion::completions(
+                snapshot,
+                params.text_document_position.position,
+                &template_ids,
+                &tag_names,
+            ))
+        }))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -116,12 +177,25 @@ impl LanguageServer for Backend {
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
         let documents = self.documents.lock().expect("document store poisoned");
+        let workspace = self.workspace.lock().expect("workspace index poisoned");
         let document = &params.text_document_position_params;
         Ok(documents
             .get(&document.text_document.uri)
             .and_then(|snapshot| {
-                navigation::definition(snapshot, &document.text_document.uri, document.position)
+                navigation::definition(
+                    snapshot,
+                    &document.text_document.uri,
+                    document.position,
+                    &workspace,
+                )
             }))
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        self.workspace
+            .lock()
+            .expect("workspace index poisoned")
+            .refresh_affected(params.changes.into_iter().map(|change| change.uri));
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {

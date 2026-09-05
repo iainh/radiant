@@ -7,8 +7,9 @@ description = "Language server for Radiant templates"
 
 [dependencies]
 radiant-compiler = { path = "../radiant-compiler" }
+serde_json = "1"
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 tower-lsp = "0.20"
 
 [dev-dependencies]
-serde_json = "1"
+tempfile = "3"

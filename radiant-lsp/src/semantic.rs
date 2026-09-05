@@ -317,7 +317,7 @@ fn tag_end(text: &str) -> Option<usize> {
     None
 }
 
-fn opening_name_span(text: &str, span: Span, name: &str) -> Span {
+pub(crate) fn opening_name_span(text: &str, span: Span, name: &str) -> Span {
     let source = &text[span.start..span.end.min(text.len())];
     source
         .find('#')

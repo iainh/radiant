@@ -1,10 +1,14 @@
-use radiant_compiler::{BUILT_IN_SECTIONS, Span, built_in_block_names};
+use radiant_compiler::{ArgumentValue, BUILT_IN_SECTIONS, Node, Span, built_in_block_names};
 use tower_lsp::lsp_types::{
     GotoDefinitionResponse, Hover, HoverContents, Location, MarkupContent, MarkupKind, Position,
     Url,
 };
 
-use crate::{DocumentSnapshot, semantic::SemanticIndex};
+use crate::{
+    DocumentSnapshot,
+    semantic::{SemanticIndex, opening_name_span},
+    workspace::WorkspaceIndex,
+};
 
 pub(crate) fn hover(snapshot: &DocumentSnapshot, position: Position) -> Option<Hover> {
     let cursor = snapshot.line_index.position_to_byte(position);
@@ -36,8 +40,15 @@ pub(crate) fn definition(
     snapshot: &DocumentSnapshot,
     uri: &Url,
     position: Position,
+    workspace: &WorkspaceIndex,
 ) -> Option<GotoDefinitionResponse> {
     let cursor = snapshot.line_index.position_to_byte(position);
+    if let Some(id) =
+        template_reference_at(&snapshot.analysis.template.nodes, &snapshot.text, cursor)
+    {
+        let location = workspace.location(uri, &id)?;
+        return Some(GotoDefinitionResponse::Scalar(location));
+    }
     let semantic = SemanticIndex::new(&snapshot.analysis.template.nodes, &snapshot.text);
     if semantic.construct_at(cursor).is_some() {
         return None;
@@ -50,6 +61,57 @@ pub(crate) fn definition(
         uri.clone(),
         snapshot.line_index.span_to_range(declaration.name_span),
     )))
+}
+
+fn template_reference_at(nodes: &[Node], text: &str, cursor: usize) -> Option<String> {
+    for node in nodes {
+        let Node::Section(section) = node else {
+            continue;
+        };
+        if section.name == "include" {
+            let dynamic = section
+                .arguments
+                .iter()
+                .any(|argument| argument.name.as_deref() == Some("_id"))
+                || section
+                    .arguments
+                    .first()
+                    .and_then(|argument| match &argument.value {
+                        ArgumentValue::String(value) | ArgumentValue::Raw(value) => Some(value),
+                        ArgumentValue::Expression(_) => None,
+                    })
+                    .is_some_and(|value| value.starts_with("_id="));
+            if !dynamic
+                && let Some(argument) = section.arguments.first()
+                && argument.name.is_none()
+                && contains(argument.span, cursor)
+            {
+                let id = match &argument.value {
+                    ArgumentValue::String(value) | ArgumentValue::Raw(value) => value,
+                    ArgumentValue::Expression(_) => return None,
+                };
+                return Some(
+                    id.split_once('$')
+                        .map_or(id.as_str(), |(template, _)| template)
+                        .into(),
+                );
+            }
+        } else if !BUILT_IN_SECTIONS.contains(&section.name.as_str())
+            && contains(opening_name_span(text, section.span, &section.name), cursor)
+        {
+            return Some(format!("tags/{}", section.name));
+        }
+        for block in &section.blocks {
+            if let Some(reference) = template_reference_at(&block.nodes, text, cursor) {
+                return Some(reference);
+            }
+        }
+    }
+    None
+}
+
+const fn contains(span: Span, cursor: usize) -> bool {
+    span.start <= cursor && cursor < span.end
 }
 
 fn markdown_hover(snapshot: &DocumentSnapshot, span: Span, value: String) -> Hover {
@@ -133,9 +195,12 @@ fn construct_markdown(name: &str, parent: Option<&str>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
     use tower_lsp::lsp_types::{HoverContents, Position, Url};
 
-    use crate::DocumentStore;
+    use crate::{DocumentStore, workspace::WorkspaceIndex};
 
     use super::{definition, hover};
 
@@ -154,6 +219,14 @@ mod tests {
             panic!("expected Markdown hover")
         };
         Some(contents.value)
+    }
+
+    fn local_definition(
+        snapshot: &crate::DocumentSnapshot,
+        uri: &Url,
+        position: Position,
+    ) -> Option<tower_lsp::lsp_types::GotoDefinitionResponse> {
+        definition(snapshot, uri, position, &WorkspaceIndex::default())
     }
 
     #[test]
@@ -208,7 +281,8 @@ mod tests {
         ] {
             let use_at = source.rfind(usage).unwrap() + usize::from(usage.starts_with('{'));
             let response =
-                definition(snapshot, &uri, snapshot.line_index.byte_to_position(use_at)).unwrap();
+                local_definition(snapshot, &uri, snapshot.line_index.byte_to_position(use_at))
+                    .unwrap();
             let tower_lsp::lsp_types::GotoDefinitionResponse::Scalar(location) = response else {
                 panic!("expected scalar definition")
             };
@@ -232,7 +306,7 @@ mod tests {
             ("{it}", "each", "each".len()),
             ("{answer}", "answer=", "answer".len()),
         ] {
-            let response = definition(
+            let response = local_definition(
                 snapshot,
                 &uri,
                 snapshot
@@ -267,7 +341,8 @@ mod tests {
             let (uri, documents) = snapshot(source);
             let snapshot = documents.get(&uri).unwrap();
             assert!(
-                definition(snapshot, &uri, snapshot.line_index.byte_to_position(byte)).is_none()
+                local_definition(snapshot, &uri, snapshot.line_index.byte_to_position(byte))
+                    .is_none()
             );
         }
     }
@@ -287,7 +362,7 @@ mod tests {
         let snapshot = documents.get(&uri).unwrap();
 
         assert!(
-            definition(
+            local_definition(
                 snapshot,
                 &uri,
                 snapshot
@@ -296,5 +371,55 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn definitions_resolve_static_includes_and_user_tags_but_not_dynamic_or_escaping_paths() {
+        let workspace = tempdir().unwrap();
+        fs::create_dir_all(workspace.path().join("templates/layouts")).unwrap();
+        fs::create_dir_all(workspace.path().join("templates/tags")).unwrap();
+        let layout = workspace.path().join("templates/layouts/base.html");
+        let tag = workspace.path().join("templates/tags/card.html");
+        fs::write(&layout, "layout").unwrap();
+        fs::write(&tag, "tag").unwrap();
+        fs::write(workspace.path().join("templates/_id=target.html"), "decoy").unwrap();
+        let source =
+            "{#include 'layouts/base' /}{#card /}{#include _id=target /}{#include ../secret /}";
+        let uri = Url::from_file_path(workspace.path().join("templates/page.html")).unwrap();
+        let mut documents = DocumentStore::default();
+        documents.open(uri.clone(), 1, source.into());
+        let snapshot = documents.get(&uri).unwrap();
+        let mut templates = WorkspaceIndex::default();
+        templates.set_roots([Url::from_file_path(workspace.path()).unwrap()]);
+
+        for (reference, target) in [("layouts/base", layout), ("card", tag)] {
+            let response = definition(
+                snapshot,
+                &uri,
+                snapshot
+                    .line_index
+                    .byte_to_position(source.find(reference).unwrap()),
+                &templates,
+            )
+            .unwrap();
+            let tower_lsp::lsp_types::GotoDefinitionResponse::Scalar(location) = response else {
+                panic!("expected scalar definition")
+            };
+            assert_eq!(location.uri, Url::from_file_path(target).unwrap());
+            assert_eq!(location.range.start, Position::new(0, 0));
+        }
+        for reference in ["target", "../secret"] {
+            assert!(
+                definition(
+                    snapshot,
+                    &uri,
+                    snapshot
+                        .line_index
+                        .byte_to_position(source.find(reference).unwrap()),
+                    &templates,
+                )
+                .is_none()
+            );
+        }
     }
 }

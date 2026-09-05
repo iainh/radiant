@@ -3,21 +3,34 @@ use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position};
 
 use crate::{DocumentSnapshot, semantic::SemanticIndex};
 
-pub(crate) fn completions(snapshot: &DocumentSnapshot, position: Position) -> Vec<CompletionItem> {
+pub(crate) fn completions(
+    snapshot: &DocumentSnapshot,
+    position: Position,
+    template_ids: &[String],
+    tag_names: &[String],
+) -> Vec<CompletionItem> {
     let cursor = snapshot.line_index.position_to_byte(position);
-    if suppressed_by_ast(&snapshot.analysis.template.nodes, cursor) {
-        return Vec::new();
-    }
     let LexicalContext::Tag { start, content } = lexical_context(&snapshot.text, cursor) else {
         return Vec::new();
     };
 
     if let Some(section_prefix) = content.strip_prefix('#') {
+        if include_id_position(section_prefix) {
+            return template_ids
+                .iter()
+                .map(|id| item(id, CompletionItemKind::FILE, "template"))
+                .collect();
+        }
         if !section_prefix.chars().any(char::is_whitespace) {
             let mut items = BUILT_IN_SECTIONS
                 .iter()
                 .map(|name| item(name, CompletionItemKind::KEYWORD, "built-in section"))
                 .collect::<Vec<_>>();
+            items.extend(
+                tag_names
+                    .iter()
+                    .map(|name| item(name, CompletionItemKind::REFERENCE, "user tag")),
+            );
             if let Some(parent) = containing_section(&snapshot.analysis.template.nodes, start) {
                 items.extend(
                     built_in_block_names(&parent.name)
@@ -34,6 +47,10 @@ pub(crate) fn completions(snapshot: &DocumentSnapshot, position: Position) -> Ve
         return Vec::new();
     }
 
+    if suppressed_by_ast(&snapshot.analysis.template.nodes, cursor) {
+        return Vec::new();
+    }
+
     SemanticIndex::new(&snapshot.analysis.template.nodes, &snapshot.text)
         .visible_declarations(cursor)
         .into_iter()
@@ -45,6 +62,23 @@ pub(crate) fn completions(snapshot: &DocumentSnapshot, position: Position) -> Ve
             )
         })
         .collect()
+}
+
+fn include_id_position(section: &str) -> bool {
+    let Some(arguments) = section.strip_prefix("include") else {
+        return false;
+    };
+    if arguments.is_empty() || !arguments.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let argument = arguments.trim_start();
+    let Some(first) = argument.chars().next() else {
+        return true;
+    };
+    if matches!(first, '\'' | '"') {
+        return !argument[first.len_utf8()..].contains(first);
+    }
+    !argument.chars().any(char::is_whitespace)
 }
 
 fn item(label: &str, kind: CompletionItemKind, detail: &str) -> CompletionItem {
@@ -224,15 +258,29 @@ mod tests {
     use super::completions;
 
     fn labels(source: &str, marker: &str) -> Vec<String> {
+        workspace_labels(source, marker, &[], &[])
+    }
+
+    fn workspace_labels(
+        source: &str,
+        marker: &str,
+        template_ids: &[String],
+        tag_names: &[String],
+    ) -> Vec<String> {
         let cursor = source.find(marker).unwrap();
         let source = source.replacen(marker, "", 1);
         let uri = Url::parse("file:///workspace/templates/page.html").unwrap();
         let mut documents = DocumentStore::default();
         let snapshot = documents.open(uri, 1, source);
-        completions(snapshot, snapshot.line_index.byte_to_position(cursor))
-            .into_iter()
-            .map(|item: CompletionItem| item.label)
-            .collect()
+        completions(
+            snapshot,
+            snapshot.line_index.byte_to_position(cursor),
+            template_ids,
+            tag_names,
+        )
+        .into_iter()
+        .map(|item: CompletionItem| item.label)
+        .collect()
     }
 
     #[test]
@@ -242,6 +290,29 @@ mod tests {
         assert!(labels.contains(&"if".into()));
         assert!(labels.contains(&"fragment".into()));
         assert!(!labels.contains(&"else".into()));
+    }
+
+    #[test]
+    fn completes_include_ids_and_user_tags_in_incomplete_tags() {
+        let templates = ["layouts/base".into(), "tags/card".into()];
+        let tags = ["card".into()];
+
+        assert_eq!(
+            workspace_labels("{#include 'lay<CURSOR>", "<CURSOR>", &templates, &tags),
+            templates
+        );
+        let section_names = workspace_labels("{#ca<CURSOR>", "<CURSOR>", &templates, &tags);
+        assert!(section_names.contains(&"if".into()));
+        assert!(section_names.contains(&"card".into()));
+        assert!(
+            workspace_labels(
+                "{#include layouts/base x=<CURSOR>",
+                "<CURSOR>",
+                &templates,
+                &tags
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -302,6 +373,9 @@ mod tests {
         let mut documents = DocumentStore::default();
         let snapshot = documents.open(uri, 1, source.into());
 
-        assert_eq!(completions(snapshot, Position::new(0, 20))[0].label, "name");
+        assert_eq!(
+            completions(snapshot, Position::new(0, 20), &[], &[])[0].label,
+            "name"
+        );
     }
 }
